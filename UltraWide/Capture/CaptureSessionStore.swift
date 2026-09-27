@@ -92,13 +92,22 @@ final class CaptureSessionStore {
                     )
                 }
             }
+            let isLegacyGrid = snapshot.coverageFraction == nil
             let centerID = "r\(snapshot.plan.rows / 2)c\(snapshot.plan.columns / 2)"
             let centerFrameExists = snapshot.slots.first { $0.id == centerID }?.frame != nil
-            guard snapshot.slots.count == snapshot.plan.expectedFrameCount,
-                  (snapshot.frames.isEmpty || centerFrameExists),
+            guard snapshot.slots.count <= 60,
+                  Set(snapshot.slots.map(\.id)).count == snapshot.slots.count,
+                  (!isLegacyGrid || snapshot.slots.count == snapshot.plan.expectedFrameCount),
+                  (!isLegacyGrid || snapshot.frames.isEmpty || centerFrameExists),
                   (1...2).contains(snapshot.currentPass),
-                  (0...6).contains(snapshot.retakeCount) else {
+                  (0...60).contains(snapshot.retakeCount) else {
                 throw CaptureError.corruptSavedSession
+            }
+            if isLegacyGrid {
+                snapshot.coverageFraction = CoverageTracker(
+                    plan: snapshot.plan, frames: snapshot.frames
+                ).fraction
+                needsPathUpdate = true
             }
             if needsPathUpdate { try? save(snapshot) }
             return snapshot

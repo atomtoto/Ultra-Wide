@@ -34,7 +34,7 @@ public enum StitchingFailure: Error, LocalizedError, Sendable {
     case insufficientOverlap(rejectedIndices: [Int])
     case invalidGeometry
     case incompleteCoverage(rejectedIndices: [Int])
-    case exportFailed
+    case exportFailed(String)
     case cancelled
     case unsupportedPlatform
     case unknown(String)
@@ -46,7 +46,7 @@ public enum StitchingFailure: Error, LocalizedError, Sendable {
         case .insufficientOverlap: String(localized: "Some photos do not overlap enough. Retake the indicated views.")
         case .invalidGeometry: String(localized: "The photos could not be aligned reliably. Try a steadier sweep.")
         case .incompleteCoverage: String(localized: "The sweep does not cover the requested image. Capture the missing edges.")
-        case .exportFailed: String(localized: "The assembled image could not be saved.")
+        case .exportFailed(let reason): reason
         case .cancelled: String(localized: "Assembly was cancelled.")
         case .unsupportedPlatform: String(localized: "Photo assembly requires an iPhone.")
         case .unknown(let message): message
@@ -65,7 +65,7 @@ public enum StitchingFailure: Error, LocalizedError, Sendable {
         case UWStitcherErrorCode.insufficientOverlap.rawValue: self = .insufficientOverlap(rejectedIndices: rejected)
         case UWStitcherErrorCode.invalidGeometry.rawValue: self = .invalidGeometry
         case UWStitcherErrorCode.incompleteCoverage.rawValue: self = .incompleteCoverage(rejectedIndices: rejected)
-        case UWStitcherErrorCode.exportFailed.rawValue: self = .exportFailed
+        case UWStitcherErrorCode.exportFailed.rawValue: self = .exportFailed(error.localizedDescription)
         case UWStitcherErrorCode.cancelled.rawValue: self = .cancelled
         case UWStitcherErrorCode.unsupportedPlatform.rawValue: self = .unsupportedPlatform
         default: self = .unknown(error.localizedDescription)

@@ -9,24 +9,24 @@
     {
       "layers" : [
         {
-          "image-name" : "Rectangle 4.svg",
-          "name" : "Rectangle 4",
+          "image-name" : "Rectangle 3.svg",
+          "name" : "Rectangle 3",
           "position" : {
-            "scale" : 10,
+            "scale" : 20,
             "translation-in-points" : [
-              -55,
-              515.9089947566365
+              267.1476171344573,
+              989.999972513269
             ]
           }
         },
         {
-          "image-name" : "Rectangle 3.svg",
-          "name" : "Rectangle 3",
+          "image-name" : "Rectangle 4.svg",
+          "name" : "Rectangle 4",
           "position" : {
-            "scale" : 10,
+            "scale" : 20,
             "translation-in-points" : [
-              185,
-              515.9089947566365
+              -20,
+              989.9999725132692
             ]
           }
         },
@@ -63,10 +63,10 @@
           "name" : "Polygon 3",
           "opacity" : 1,
           "position" : {
-            "scale" : 10,
+            "scale" : 20,
             "translation-in-points" : [
-              5.476110535703697,
-              251.0910052433635
+              8.952221071407394,
+              556.0910297500071
             ]
           }
         },
@@ -94,7 +94,7 @@
           "image-name" : "Ellipse 1.svg",
           "name" : "Ellipse 1",
           "position" : {
-            "scale" : 10,
+            "scale" : 13,
             "translation-in-points" : [
               0,
               0
@@ -105,7 +105,7 @@
           "image-name" : "Ellipse 2.svg",
           "name" : "Ellipse 2",
           "position" : {
-            "scale" : 10,
+            "scale" : 11,
             "translation-in-points" : [
               0,
               0

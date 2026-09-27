@@ -1,17 +1,21 @@
 import AVFoundation
+import CoreImage
 import Foundation
+import ImageIO
+import QuartzCore
 
-/// All session mutations and still captures run on one serial queue. The
-/// session itself can be attached to an AVCaptureVideoPreviewLayer on main.
+/// Keeps the physical wide or tele camera running and exposes selected frames
+/// from its video stream. Encoding happens off the capture callback queue.
 final class CameraService: @unchecked Sendable {
     let session = AVCaptureSession()
 
-    private let queue = DispatchQueue(label: "com.ultrawide.camera", qos: .userInitiated)
-    private let photoOutput = AVCapturePhotoOutput()
-    private var retainedDelegates: [Int64: PhotoDelegate] = [:]
+    private let sessionQueue = DispatchQueue(label: "com.ultrawide.camera.session", qos: .userInitiated)
+    private let videoQueue = DispatchQueue(label: "com.ultrawide.camera.video", qos: .userInitiated)
+    private let encodingQueue = DispatchQueue(label: "com.ultrawide.camera.encoding", qos: .userInitiated)
+    private let output = AVCaptureVideoDataOutput()
+    private let frameCache = VideoFrameCache()
+    private let imageContext = CIContext(options: [.cacheIntermediates: false])
     private var activeDevice: AVCaptureDevice?
-    private var imagingLocked = false
-    private var inFlightPhotos = 0
     private var pauseRequested = false
 
     static func device(for lens: CaptureLens) -> AVCaptureDevice? {
@@ -31,7 +35,7 @@ final class CameraService: @unchecked Sendable {
 
     func configure(lens: CaptureLens, orientation: CaptureOrientation) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            queue.async { [self] in
+            sessionQueue.async { [self] in
                 do {
                     try configureOnQueue(lens: lens, orientation: orientation)
                     continuation.resume()
@@ -43,34 +47,37 @@ final class CameraService: @unchecked Sendable {
     }
 
     private func configureOnQueue(lens: CaptureLens, orientation: CaptureOrientation) throws {
-        guard let device = Self.device(for: lens) else {
-            throw CaptureError.lensUnavailable
-        }
-        guard inFlightPhotos == 0 else { throw CaptureError.notReady }
+        guard let device = Self.device(for: lens) else { throw CaptureError.lensUnavailable }
         pauseRequested = false
-        imagingLocked = false
         activeDevice = nil
         if session.isRunning { session.stopRunning() }
+        // Drain callbacks from the previous configuration before accepting
+        // dimensions or images from the new lens.
+        videoQueue.sync {}
+        frameCache.clear()
         let input = try AVCaptureDeviceInput(device: device)
         session.beginConfiguration()
         session.sessionPreset = .photo
-        for existing in session.inputs { session.removeInput(existing) }
-        for existing in session.outputs { session.removeOutput(existing) }
-        guard session.canAddInput(input), session.canAddOutput(photoOutput) else {
+        session.inputs.forEach { session.removeInput($0) }
+        session.outputs.forEach { session.removeOutput($0) }
+        output.alwaysDiscardsLateVideoFrames = true
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        ]
+        output.setSampleBufferDelegate(frameCache, queue: videoQueue)
+        guard session.canAddInput(input), session.canAddOutput(output) else {
             session.commitConfiguration()
             throw CaptureError.cameraConfigurationFailed
         }
         session.addInput(input)
-        session.addOutput(photoOutput)
-        photoOutput.maxPhotoQualityPrioritization = .quality
-        if let largest = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
-            Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height)
-        }) {
-            photoOutput.maxPhotoDimensions = largest
-        }
-        if let connection = photoOutput.connection(with: .video),
-           connection.isVideoRotationAngleSupported(orientation.rotationAngle) {
-            connection.videoRotationAngle = orientation.rotationAngle
+        session.addOutput(output)
+        if let connection = output.connection(with: .video) {
+            if connection.isVideoRotationAngleSupported(orientation.rotationAngle) {
+                connection.videoRotationAngle = orientation.rotationAngle
+            }
+            if connection.isVideoStabilizationSupported {
+                connection.preferredVideoStabilizationMode = .off
+            }
         }
         session.commitConfiguration()
 
@@ -91,98 +98,92 @@ final class CameraService: @unchecked Sendable {
         activeDevice = device
     }
 
+    /// Dimensions come from delivered samples, rather than an assumed 4:3
+    /// photo format. A video output can instead be 16:9.
+    func videoLandscapeAspectRatio() async throws -> Double {
+        let deadline = CACurrentMediaTime() + 3
+        while CACurrentMediaTime() < deadline {
+            if let dimensions = frameCache.latestDimensions() {
+                let width = Double(max(dimensions.width, dimensions.height))
+                let height = Double(min(dimensions.width, dimensions.height))
+                if height > 0 { return width / height }
+            }
+            try await Task.sleep(for: .milliseconds(35))
+        }
+        throw CaptureError.cameraUnavailable
+    }
+
     func resume() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            queue.async { [self] in
+            sessionQueue.async { [self] in
                 guard !session.inputs.isEmpty else {
                     continuation.resume(throwing: CaptureError.cameraConfigurationFailed)
                     return
                 }
+                pauseRequested = false
                 if !session.isRunning { session.startRunning() }
-                if session.isRunning {
-                    continuation.resume()
-                } else {
-                    continuation.resume(throwing: CaptureError.cameraUnavailable)
-                }
+                session.isRunning ? continuation.resume()
+                    : continuation.resume(throwing: CaptureError.cameraUnavailable)
             }
         }
     }
 
     func pause() {
-        queue.async { [self] in
+        sessionQueue.async { [self] in
             pauseRequested = true
-            if inFlightPhotos == 0 && session.isRunning { session.stopRunning() }
+            if session.isRunning { session.stopRunning() }
+            videoQueue.sync {}
+            frameCache.clear()
         }
     }
 
-    /// Called just before the first still of each pass. It waits briefly for
-    /// automatic focus, exposure, and color to settle, then fixes their values
-    /// for the sweep. The UI rechecks motion alignment after this await.
-    func prepareForCapture() async throws {
+    /// Lock focus and white balance after the center frame is selected. This
+    /// must not hold up the user's tap or a camera interruption.
+    func prepareForSweep() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            queue.async { [self] in
+            sessionQueue.async { [self] in
                 guard session.isRunning, !pauseRequested, let device = activeDevice else {
                     continuation.resume(throwing: CaptureError.cameraUnavailable)
                     return
                 }
-                if !imagingLocked {
-                    let deadline = Date().addingTimeInterval(1.2)
-                    while (device.isAdjustingFocus || device.isAdjustingExposure || device.isAdjustingWhiteBalance)
-                            && Date() < deadline {
-                        Thread.sleep(forTimeInterval: 0.04)
-                    }
-                    do {
-                        try device.lockForConfiguration()
-                        if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
-                        if device.isExposureModeSupported(.locked) { device.exposureMode = .locked }
-                        if device.isWhiteBalanceModeSupported(.locked) { device.whiteBalanceMode = .locked }
-                        device.unlockForConfiguration()
-                        imagingLocked = true
-                    } catch {
-                        continuation.resume(throwing: error)
-                        return
-                    }
+                do {
+                    try device.lockForConfiguration()
+                    if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
+                    if device.isWhiteBalanceModeSupported(.locked) { device.whiteBalanceMode = .locked }
+                    device.unlockForConfiguration()
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-                continuation.resume()
             }
         }
     }
 
-    func capturePhoto() async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            queue.async { [self] in
-                guard session.isRunning, !pauseRequested else {
-                    continuation.resume(throwing: CaptureError.cameraUnavailable)
+    /// Select the video buffer before enqueuing JPEG encoding. Its arrival
+    /// must be close to the motion reading that will describe its geometry.
+    func captureVideoFrame(near motionTimestamp: TimeInterval) async throws -> Data {
+        guard let frame = frameCache.latest(near: motionTimestamp, maxAge: 0.20) else {
+            throw CaptureError.photoDataUnavailable
+        }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+            encodingQueue.async { [self] in
+                let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+                guard let cgImage = imageContext.createCGImage(image, from: image.extent),
+                      let destinationData = CFDataCreateMutable(nil, 0),
+                      let destination = CGImageDestinationCreateWithData(
+                        destinationData, "public.jpeg" as CFString, 1, nil
+                      ) else {
+                    continuation.resume(throwing: CaptureError.photoDataUnavailable)
                     return
                 }
-                let codec: AVVideoCodecType = photoOutput.availablePhotoCodecTypes.contains(.hevc)
-                    ? .hevc : .jpeg
-                let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: codec])
-                settings.photoQualityPrioritization = .quality
-                let dimensions = photoOutput.maxPhotoDimensions
-                if dimensions.width > 0 && dimensions.height > 0 {
-                    settings.maxPhotoDimensions = dimensions
+                CGImageDestinationAddImage(destination, cgImage, [
+                    kCGImageDestinationLossyCompressionQuality: 0.91
+                ] as CFDictionary)
+                guard CGImageDestinationFinalize(destination) else {
+                    continuation.resume(throwing: CaptureError.photoDataUnavailable)
+                    return
                 }
-                let id = settings.uniqueID
-                // Resume only after the delegate has been removed on our queue.
-                // Otherwise a quick Finish -> Refine can try to reconfigure
-                // while this photo still appears to be in flight.
-                let delegate = PhotoDelegate { [self] result in
-                    self.queue.async { [self] in
-                        self.retainedDelegates.removeValue(forKey: id)
-                        self.inFlightPhotos -= 1
-                        if self.pauseRequested && self.inFlightPhotos == 0 && self.session.isRunning {
-                            self.session.stopRunning()
-                        }
-                        continuation.resume(with: result)
-                    }
-                }
-                retainedDelegates[id] = delegate
-                inFlightPhotos += 1
-                photoOutput.capturePhoto(with: settings, delegate: delegate)
-                queue.asyncAfter(deadline: .now() + 15) { [weak delegate] in
-                    delegate?.failIfStillPending()
-                }
+                continuation.resume(returning: destinationData as Data)
             }
         }
     }
@@ -198,61 +199,47 @@ extension CaptureOrientation {
     }
 }
 
-private final class PhotoDelegate: NSObject, AVCapturePhotoCaptureDelegate, @unchecked Sendable {
+private struct VideoFrame: @unchecked Sendable {
+    let pixelBuffer: CVPixelBuffer
+}
+
+private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    private var processingResult: Result<Data, Error>?
-    private var didComplete = false
-    private let onComplete: @Sendable (Result<Data, Error>) -> Void
+    private var buffer: CVPixelBuffer?
+    private var receivedAt: TimeInterval = 0
 
-    init(onComplete: @escaping @Sendable (Result<Data, Error>) -> Void) {
-        self.onComplete = onComplete
-    }
-
-    func photoOutput(
-        _ output: AVCapturePhotoOutput,
-        didFinishProcessingPhoto photo: AVCapturePhoto,
-        error: Error?
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
     ) {
-        let result: Result<Data, Error>
-        if let error {
-            result = .failure(error)
-        } else if let data = photo.fileDataRepresentation() {
-            result = .success(data)
-        } else {
-            result = .failure(CaptureError.photoDataUnavailable)
-        }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lock.lock()
-        if !didComplete { processingResult = result }
+        buffer = pixelBuffer
+        receivedAt = CACurrentMediaTime()
         lock.unlock()
     }
 
-    func photoOutput(
-        _ output: AVCapturePhotoOutput,
-        didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
-        error: Error?
-    ) {
+    func latestDimensions() -> (width: Int, height: Int)? {
         lock.lock()
-        guard !didComplete else {
-            lock.unlock()
-            return
-        }
-        didComplete = true
-        let result = error.map { Result<Data, Error>.failure($0) }
-            ?? processingResult ?? .failure(CaptureError.photoDataUnavailable)
-        processingResult = nil
-        lock.unlock()
-        onComplete(result)
+        defer { lock.unlock() }
+        guard let buffer else { return nil }
+        return (CVPixelBufferGetWidth(buffer), CVPixelBufferGetHeight(buffer))
     }
 
-    func failIfStillPending() {
+    func latest(near timestamp: TimeInterval, maxAge: TimeInterval) -> VideoFrame? {
         lock.lock()
-        guard !didComplete else {
-            lock.unlock()
-            return
-        }
-        didComplete = true
-        processingResult = nil
+        defer { lock.unlock() }
+        let age = CACurrentMediaTime() - receivedAt
+        guard age >= 0, age <= maxAge,
+              abs(receivedAt - timestamp) <= maxAge else { return nil }
+        return buffer.map { VideoFrame(pixelBuffer: $0) }
+    }
+
+    func clear() {
+        lock.lock()
+        buffer = nil
+        receivedAt = 0
         lock.unlock()
-        onComplete(.failure(CaptureError.cameraUnavailable))
     }
 }

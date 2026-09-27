@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// The physical rear camera used for every photograph in a capture session.
@@ -67,22 +68,24 @@ struct CapturePlan: Codable, Equatable, Sendable {
         orientation: CaptureOrientation = .portrait,
         wideHorizontalFOV: Double,
         lensHorizontalFOV: Double,
+        sourceLandscapeAspectRatio: Double = 4.0 / 3.0,
         maximumViews: Int = 30
     ) -> CapturePlan? {
         guard (15...120).contains(wideHorizontalFOV),
               (5...120).contains(lensHorizontalFOV),
+              (1.0...2.4).contains(sourceLandscapeAspectRatio),
               maximumViews > 0 else { return nil }
 
         let landscapeSourceH = lensHorizontalFOV
         let landscapeTargetH = min(125, 2 * atan(tan(wideHorizontalFOV * .pi / 360) / target.magnification) * 180 / .pi)
         let sourceH = orientation.isPortrait
-            ? verticalFieldOfView(fromHorizontal: landscapeSourceH) : landscapeSourceH
+            ? verticalFieldOfView(fromHorizontal: landscapeSourceH, aspect: sourceLandscapeAspectRatio) : landscapeSourceH
         let sourceV = orientation.isPortrait
-            ? landscapeSourceH : verticalFieldOfView(fromHorizontal: landscapeSourceH)
+            ? landscapeSourceH : verticalFieldOfView(fromHorizontal: landscapeSourceH, aspect: sourceLandscapeAspectRatio)
         let targetH = orientation.isPortrait
-            ? verticalFieldOfView(fromHorizontal: landscapeTargetH) : landscapeTargetH
+            ? verticalFieldOfView(fromHorizontal: landscapeTargetH, aspect: 4.0 / 3.0) : landscapeTargetH
         let targetV = orientation.isPortrait
-            ? landscapeTargetH : verticalFieldOfView(fromHorizontal: landscapeTargetH)
+            ? landscapeTargetH : verticalFieldOfView(fromHorizontal: landscapeTargetH, aspect: 4.0 / 3.0)
 
         func oddCount(target: Double, source: Double) -> Int {
             let needed = max(0, target - source)
@@ -114,8 +117,8 @@ struct CapturePlan: Codable, Equatable, Sendable {
         )
     }
 
-    private static func verticalFieldOfView(fromHorizontal horizontal: Double) -> Double {
-        2 * atan(tan(horizontal * .pi / 360) * 3 / 4) * 180 / .pi
+    private static func verticalFieldOfView(fromHorizontal horizontal: Double, aspect: Double) -> Double {
+        2 * atan(tan(horizontal * .pi / 360) / aspect) * 180 / .pi
     }
 
     func makeSlots() -> [CaptureSlot] {
@@ -182,15 +185,28 @@ struct CaptureSessionSnapshot: Codable, Equatable, Sendable {
     var currentPass: Int
     var isPassOpen: Bool
     var retakeCount: Int
+    /// Optional so sessions created by earlier app versions remain readable.
+    var coverageFraction: Double?
     let createdAt: Date
     var updatedAt: Date
 
     var frames: [CapturedFrame] { slots.compactMap(\.frame) }
     var missingSlotIDs: [String] { slots.filter { $0.frame == nil }.map(\.id) }
-    var isComplete: Bool { missingSlotIDs.isEmpty }
+    var isComplete: Bool {
+        if let coverageFraction { return coverageFraction >= 0.999999 && frames.count >= 2 }
+        return missingSlotIDs.isEmpty && frames.count >= 2
+    }
     var suggestedRefinementSlotIDs: [String] {
         slots.filter { $0.frame?.quality == .soft || $0.frame?.quality == .dark }.map(\.id)
     }
+}
+
+/// Geometry is relative to the requested result, with (0, 0) at its top left.
+/// Rectangles can slightly extend outside 0...1: that overscan protects edges.
+struct CaptureCoverage: Equatable, Sendable {
+    let viewRect: CGRect
+    let coveredRects: [CGRect]
+    let fraction: Double
 }
 
 struct CaptureGuidance: Equatable, Sendable {
@@ -257,14 +273,14 @@ enum CaptureError: LocalizedError, Sendable {
         case .notReady: "La prise de vue n’est pas prête."
         case .notAligned: "Alignez le repère et immobilisez l’iPhone."
         case .orientationChanged: "Remettez l’iPhone dans l’orientation du début de session."
-        case .noCurrentSlot: "Toutes les vues prévues sont déjà prises."
-        case .incompletePass: "Certaines vues restent à capturer."
-        case .retakeLimitReached: "La limite de six reprises est atteinte."
+        case .noCurrentSlot: "Aucune vue n’est disponible."
+        case .incompletePass: "Balayez un peu plus avant d’arrêter."
+        case .retakeLimitReached: "La limite de 60 images est atteinte. Recommencez une prise."
         case .invalidSlot: "Cette vue n’appartient pas à la session."
         case .noSavedSession: "Aucune session à reprendre."
         case .corruptSavedSession: "La session enregistrée est incomplète."
-        case .photoDataUnavailable: "La photo n’a pas pu être lue."
-        case .diskWriteFailed: "La photo n’a pas pu être enregistrée sur l’iPhone."
+        case .photoDataUnavailable: "Une image du flux vidéo n’a pas pu être lue."
+        case .diskWriteFailed: "L’image n’a pas pu être enregistrée sur l’iPhone."
         }
     }
 }

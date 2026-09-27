@@ -31,6 +31,9 @@ final class CaptureUIModel {
     var remainingRetakes = 6
     var guidance = CaptureUIGuidance()
     var coverage: [CaptureUICoverageCell] = []
+    /// Angles normalized into the desired final field of view. Updated by the
+    /// continuous sweep pipeline and rendered without exposing capture slots.
+    var sweep = CaptureUISweep()
     var canCapture = false
     var canFinishPass = false
     var canRefine = false
@@ -43,6 +46,8 @@ final class CaptureUIModel {
 
     var issue: CaptureUIIssue?
     var banner: CaptureUIMessage?
+    /// A capture already owns its lens and target, including while resuming.
+    var hasActiveSession = false
     var hasRecoverableSession = false
 
     @ObservationIgnored var onAction: ((CaptureUIAction) -> Void)?
@@ -54,7 +59,7 @@ final class CaptureUIModel {
             // The new lens may support a different set of target fields.
             availableTargets = []
         case .selectTarget(let target): selectedTarget = target
-        case .start, .resume, .retry, .confirmReanchor:
+        case .start, .startSweep, .resume, .retry, .confirmReanchor:
             isStarting = true
         case .finishPass:
             canFinishPass = false
@@ -117,6 +122,17 @@ struct CaptureUIGuidance {
     var isAutoCaptureEnabled = true
 }
 
+struct CaptureUISweep {
+    /// Current camera field of view inside the final field, in 0...1 units.
+    var viewRect: CGRect = CGRect(x: 0.31, y: 0.31, width: 0.38, height: 0.38)
+    /// Regions already captured with usable overlap, in the same coordinates.
+    var coveredRects: [CGRect] = []
+    var coverageFraction: Double = 0
+    var isRecording = false
+    var isComplete = false
+    var isFinishing = false
+}
+
 struct CaptureUICoverageCell: Identifiable {
     enum State: Equatable {
         case pending
@@ -167,6 +183,8 @@ enum CaptureUIAction {
     case selectLens(CaptureUILens)
     case selectTarget(CaptureUITarget)
     case start
+    case startSweep
+    case stopSweep
     case resume
     case confirmReanchor
     case capture

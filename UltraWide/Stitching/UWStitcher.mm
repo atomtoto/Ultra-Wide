@@ -71,8 +71,8 @@ struct MappedFile {
 
     bool create(size_t byteCount) {
         NSString *templatePath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ultrawide-XXXXXX"];
-        std::vector<char> mutablePath(templatePath.UTF8String,
-                                      templatePath.UTF8String + strlen(templatePath.UTF8String) + 1);
+        const char *utf8Path = templatePath.UTF8String;
+        std::vector<char> mutablePath(utf8Path, utf8Path + strlen(utf8Path) + 1);
         fd = mkstemp(mutablePath.data());
         if (fd < 0) return false;
         path = mutablePath.data();
@@ -535,12 +535,13 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                     @"At least two photos are required.", nil);
         return nil;
     }
-    if (frames.count > 36) {
+    if (frames.count > 96) {
         if (error) *error = UWError(UWStitcherErrorInvalidGeometry,
-                                    @"A sweep supports up to 36 photos.", nil);
+                                    @"A sweep supports up to 96 selected frames.", nil);
         return nil;
     }
     if (!Report(progress, 0, error)) return nil;
+    std::string stage = "decode";
     try {
         const int frameCount = static_cast<int>(frames.count);
         std::vector<cv::Mat> thumbnails;
@@ -585,14 +586,55 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             return nil;
         }
 
+        stage = "registration";
         cv::Ptr<cv::Stitcher> stitcher = cv::Stitcher::create(cv::Stitcher::PANORAMA);
         stitcher->setFeaturesFinder(cv::SIFT::create(1800));
         stitcher->setRegistrationResol(0.8);
         stitcher->setPanoConfidenceThresh(0.65);
         stitcher->setWaveCorrection(false);
         stitcher->setWarper(cv::makePtr<cv::PlaneWarper>());
+        // A free sweep may revisit the same area and yields many closely
+        // spaced video frames. Matching every pair becomes quadratic and
+        // gives repeated texture many chances to form a false connection.
+        // Keep temporal neighbors plus the closest views in motion space.
+        if (frameCount > 20) {
+            bool hasAllMotion = true;
+            for (UWStitchFrame *frame in frames) hasAllMotion &= frame.hasMotion;
+            if (hasAllMotion) {
+                cv::Mat matchingMask(frameCount, frameCount, CV_8U, cv::Scalar(0));
+                for (int i = 0; i < frameCount; ++i) {
+                    matchingMask.at<uint8_t>(i, i) = 1;
+                    for (int j = std::max(0, i - 3); j <= std::min(frameCount - 1, i + 3); ++j) {
+                        matchingMask.at<uint8_t>(i, j) = 1;
+                        matchingMask.at<uint8_t>(j, i) = 1;
+                    }
+                    std::vector<std::pair<double, int>> neighbors;
+                    neighbors.reserve(frameCount - 1);
+                    const UWStitchFrame *first = frames[i];
+                    for (int j = 0; j < frameCount; ++j) {
+                        if (i == j) continue;
+                        const UWStitchFrame *second = frames[j];
+                        const double distance = std::hypot(
+                            first.yawRadians - second.yawRadians,
+                            first.pitchRadians - second.pitchRadians
+                        );
+                        if (std::isfinite(distance)) neighbors.emplace_back(distance, j);
+                    }
+                    const size_t count = std::min<size_t>(16, neighbors.size());
+                    std::partial_sort(neighbors.begin(), neighbors.begin() + count, neighbors.end());
+                    for (size_t j = 0; j < count; ++j) {
+                        const int neighbor = neighbors[j].second;
+                        matchingMask.at<uint8_t>(i, neighbor) = 1;
+                        matchingMask.at<uint8_t>(neighbor, i) = 1;
+                    }
+                }
+                stitcher->setMatchingMask(matchingMask.getUMat(cv::ACCESS_READ));
+            }
+        }
         cv::Stitcher::Status status = stitcher->estimateTransform(thumbnails);
         if (status != cv::Stitcher::OK) {
+            NSLog(@"[UltraWide Stitch] registration failed: status=%d frames=%d",
+                  static_cast<int>(status), frameCount);
             UWStitcherErrorCode code = status == cv::Stitcher::ERR_NEED_MORE_IMGS
                 ? UWStitcherErrorInsufficientOverlap : UWStitcherErrorInvalidGeometry;
             if (error) *error = UWError(code,
@@ -607,6 +649,14 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             if (error) *error = UWError(UWStitcherErrorInsufficientOverlap,
                                         @"The photos do not form one connected image.", nil);
             return nil;
+        }
+        for (size_t i = 0; i < component.size(); ++i) {
+            if (component[i] < 0 || component[i] >= frameCount ||
+                cameras[i].R.rows != 3 || cameras[i].R.cols != 3) {
+                if (error) *error = UWError(UWStitcherErrorInvalidGeometry,
+                                            @"Camera alignment returned invalid frame geometry.", nil);
+                return nil;
+            }
         }
         NSMutableArray<NSNumber *> *used = [NSMutableArray arrayWithCapacity:component.size()];
         NSMutableArray<NSNumber *> *rejected = [NSMutableArray array];
@@ -636,11 +686,35 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                         @"Camera calibration produced an invalid focal length.", rejected);
             return nil;
         }
+        // Bundle adjustment only determines relative camera rotations. Its
+        // absolute orientation is arbitrary, even when the first photograph
+        // points at the center of the requested image. A plane projected in
+        // that arbitrary frame can put the whole mosaic near its horizon;
+        // measuring atan(x / focal) there dramatically underestimates the
+        // covered field of view and may distort or reject a complete sweep.
+        // Rebase all cameras on the captured center view before projection.
+        size_t centerCamera = 0;
+        double centerDistance = std::numeric_limits<double>::infinity();
+        for (size_t i = 0; i < component.size(); ++i) {
+            const UWStitchFrame *frame = frames[component[i]];
+            if (!frame.hasMotion) continue;
+            const double distance = std::hypot(frame.yawRadians, frame.pitchRadians);
+            if (std::isfinite(distance) && distance < centerDistance) {
+                centerDistance = distance;
+                centerCamera = i;
+            }
+        }
+        cv::Mat referenceRotation;
+        stage = "reference rotation";
+        cameras[centerCamera].R.convertTo(referenceRotation, CV_32F);
+        const cv::Mat referenceInverse = referenceRotation.t();
+        stage = "projection";
         cv::detail::PlaneWarper warper(static_cast<float>(focal));
         std::vector<FrameGeometry> geometry;
         geometry.reserve(component.size());
         cv::Rect2f globalBounds;
         for (size_t i = 0; i < component.size(); ++i) {
+            stage = "projection frame " + std::to_string(i);
             const int inputIndex = component[i];
             const cv::Mat &thumbnail = thumbnails[inputIndex];
             cv::detail::CameraParams camera = cameras[i];
@@ -651,6 +725,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             camera.K().convertTo(K, CV_32F); // PlaneWarper requires float intrinsics.
             cv::Mat R;
             camera.R.convertTo(R, CV_32F);
+            R = referenceInverse * R;
             std::array<cv::Point2f, 4> corners = {
                 cv::Point2f(0, 0),
                 cv::Point2f(static_cast<float>(thumbnail.cols - 1), 0),
@@ -658,6 +733,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                 cv::Point2f(0, static_cast<float>(thumbnail.rows - 1))
             };
             for (auto &corner : corners) {
+                stage = "projection point in frame " + std::to_string(i);
                 corner = warper.warpPoint(corner, K, R);
                 if (!FinitePoint(corner)) {
                     if (error) *error = UWError(UWStitcherErrorInvalidGeometry,
@@ -665,6 +741,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                     return nil;
                 }
             }
+            stage = "projection geometry in frame " + std::to_string(i);
             const cv::Rect2f bounds = Bounds(corners);
             const double projectedArea = std::abs(cv::contourArea(std::vector<cv::Point2f>(corners.begin(), corners.end())));
             const double sourceArea = static_cast<double>(thumbnail.cols) * thumbnail.rows;
@@ -677,6 +754,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             geometry.push_back({inputIndex, corners, bounds});
             globalBounds = i == 0 ? bounds : (globalBounds | bounds);
         }
+        stage = "projection coverage";
         if (globalBounds.width <= 0 || globalBounds.height <= 0 ||
             globalBounds.width > 30000 || globalBounds.height > 30000) {
             if (error) *error = UWError(UWStitcherErrorInvalidGeometry,
@@ -700,7 +778,11 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         }
         cv::erode(coverage, coverage, cv::Mat(), cv::Point(-1, -1), 2);
         cv::Rect cropPreview;
+        stage = "projection crop";
         if (!FindCoveredRectangle(coverage, aspect, cropPreview)) {
+            NSLog(@"[UltraWide Stitch] no fully covered crop: frames=%d used=%zu rejected=%lu canvas=%dx%d aspect=%.3f",
+                  frameCount, component.size(), static_cast<unsigned long>(rejected.count),
+                  previewW, previewH, aspect);
             if (error) *error = UWError(UWStitcherErrorIncompleteCoverage,
                                         @"The sweep has gaps inside the requested image.", rejected);
             return nil;
@@ -723,6 +805,10 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
              actualHorizontalFOV < minimumHorizontalFOVDegrees * kFieldTolerance) ||
             (minimumVerticalFOVDegrees > 0 &&
              actualVerticalFOV < minimumVerticalFOVDegrees * kFieldTolerance)) {
+            NSLog(@"[UltraWide Stitch] field too narrow: actual=%.1f°×%.1f° target=%.1f°×%.1f° used=%zu rejected=%lu",
+                  actualHorizontalFOV, actualVerticalFOV,
+                  minimumHorizontalFOVDegrees, minimumVerticalFOVDegrees,
+                  component.size(), static_cast<unsigned long>(rejected.count));
             if (error) *error = UWError(UWStitcherErrorIncompleteCoverage,
                                         @"The completed crop is narrower than the requested field of view.",
                                         rejected);
@@ -730,6 +816,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         }
         if (!Report(progress, 0.43, error)) return nil;
 
+        stage = "projection export dimensions";
         std::vector<double> nativeScales;
         for (size_t i = 0; i < component.size(); ++i) {
             const int index = component[i];
@@ -762,6 +849,8 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             outputH = static_cast<int>(std::floor(outputW / aspect));
         }
         if (outputW < 256 || outputH < 256 || static_cast<double>(outputW) * outputH > maxPixels) {
+            NSLog(@"[UltraWide Stitch] export crop too small: %dx%d crop=%.0fx%.0f",
+                  outputW, outputH, cropWorld.width, cropWorld.height);
             if (error) *error = UWError(UWStitcherErrorIncompleteCoverage,
                                         @"The complete area is too small to export.", rejected);
             return nil;
@@ -786,6 +875,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         }
         auto *pixels = static_cast<uint8_t *>(colorFile.bytes);
         auto *weights = static_cast<uint16_t *>(weightFile.bytes);
+        stage = "seams and color";
         const auto exposureGains = EstimateExposureGains(
             geometry, thumbnails, globalBounds, previewW, previewH, previewScale
         );
@@ -802,6 +892,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         const double seamStepX = blendPlan.scale / scaleX;
         const double seamStepY = blendPlan.scale / scaleY;
 
+        stage = "full-resolution render";
         for (size_t frameNumber = 0; frameNumber < geometry.size(); ++frameNumber) {
             @autoreleasepool {
                 const FrameGeometry &frame = geometry[frameNumber];
@@ -914,6 +1005,8 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         // No inpainting: an incomplete pixel invalidates the export before color correction.
         for (size_t i = 0; i < pixelCount; ++i) {
             if (weights[i] == 0) {
+                NSLog(@"[UltraWide Stitch] uncovered output pixel: x=%zu y=%zu size=%dx%d",
+                      i % outputW, i / outputW, outputW, outputH);
                 if (error) *error = UWError(UWStitcherErrorIncompleteCoverage,
                                             @"The selected image still contains an uncovered pixel.", rejected);
                 return nil;
@@ -943,6 +1036,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             if (y % 512 == 0 && !Report(progress, 0.90 + 0.04 * y / outputH, error)) return nil;
         }
         if (!Report(progress, 0.94, error)) return nil;
+        stage = "HEIF export";
         NSURL *directory = [outputURL URLByDeletingLastPathComponent];
         NSError *directoryError = nil;
         if (![[NSFileManager defaultManager] createDirectoryAtURL:directory
@@ -986,8 +1080,9 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                     [NSString stringWithUTF8String:exception.what()], nil);
         return nil;
     } catch (const std::exception &exception) {
+        NSLog(@"[UltraWide Stitch] %s exception: %s", stage.c_str(), exception.what());
         if (error) *error = UWError(UWStitcherErrorExportFailed,
-                                    [NSString stringWithUTF8String:exception.what()], nil);
+                                    [NSString stringWithFormat:@"%s: %s", stage.c_str(), exception.what()], nil);
         return nil;
     }
 #endif

@@ -6,8 +6,7 @@ import Photos
 import SwiftUI
 import UIKit
 
-/// Joins the durable capture session, native assembler, and SwiftUI presentation.
-/// Camera and Photos permissions are requested only when their actions need them.
+/// Connects the free video sweep, on-device assembler, and SwiftUI camera.
 @MainActor
 final class UltraWideCoordinator {
     let ui = CaptureUIModel()
@@ -15,11 +14,9 @@ final class UltraWideCoordinator {
     private let capture = CaptureController()
     private let stitcher = StitchingEngine()
     private var cancellables = Set<AnyCancellable>()
-    private var isTakingPhoto = false
-    private var autoCaptureTask: Task<Void, Never>?
-    private var autoAttemptedSlotID: String?
+    private var isAssembling = false
+    private var automaticAssemblyKey: String?
     private var orientationBannerActive = false
-    private var rejectedSlotIDs = Set<String>()
     private var lastOutputURL: URL?
 
     init() {
@@ -43,79 +40,71 @@ final class UltraWideCoordinator {
                 ui.phase = .unavailable
                 ui.issue = CaptureUIIssue(
                     kind: .cameraUnavailable,
-                    detail: message("Ultra Wide nécessite un iPhone doté d’un appareil photo arrière.",
-                                    "Ultra Wide needs an iPhone with a rear camera."),
+                    detail: message("Un iPhone doté d’un appareil photo arrière est nécessaire.",
+                                    "An iPhone with a rear camera is required."),
                     canRetry: false
                 )
+            } else if capture.currentSnapshot == nil,
+                      (capture.status == .idle || capture.status.isFailure) {
+                await preparePreview()
             }
         case .selectLens:
             updateAvailableTargets()
+            if capture.currentSnapshot == nil { await preparePreview() }
         case .selectTarget:
-            updateEstimate()
-        case .start:
-            await startCapture()
+            if capture.currentSnapshot == nil { await preparePreview() }
+        case .start, .startSweep:
+            await beginOrResumeSweep()
         case .resume:
-            await resumeCapture()
+            await resumeSavedSweep()
+        case .stopSweep, .finishPass:
+            do {
+                _ = try capture.stopSweep()
+                ui.issue = nil
+                synchronize()
+            } catch {
+                showCaptureError(error, fatal: false)
+                synchronize()
+            }
         case .confirmReanchor:
             do {
                 try capture.confirmReferenceAlignment()
+                try await capture.beginSweep()
                 ui.issue = nil
-                synchronize()
-            } catch {
-                showCaptureError(error, fatal: false)
-                synchronize()
-            }
-        case .capture:
-            autoCaptureTask?.cancel()
-            await takePhoto()
-        case .finishPass:
-            do {
-                _ = try capture.finishPass()
-                ui.issue = nil
-                synchronize()
-            } catch {
-                showCaptureError(error, fatal: false)
-                synchronize()
-            }
-        case .beginRefinementPass:
-            do {
-                try await capture.beginRefinementPass()
-                ui.issue = nil
-                ui.phase = .passReview
                 synchronize()
             } catch {
                 showCaptureError(error, fatal: capture.status.isFailure)
                 synchronize()
             }
+        case .beginRefinementPass:
+            await beginOrResumeSweep()
         case .assemble:
             await assemble()
+        case .capture:
+            // Kept for existing accessibility shortcuts; the sweep captures frames itself.
+            if capture.currentSnapshot == nil { await beginOrResumeSweep() }
         case .retake(let slotID):
             do {
                 try capture.retake(slotID: slotID)
-                rejectedSlotIDs.remove(slotID)
                 ui.issue = nil
                 synchronize()
             } catch {
                 showCaptureError(error, fatal: false)
-                synchronize()
             }
         case .pause:
-            autoCaptureTask?.cancel()
             capture.pause()
             synchronize()
-        case .discard:
-            resetCapture()
-        case .newCapture:
+        case .discard, .newCapture:
             resetCapture()
         case .saveToPhotos:
             await saveToPhotos()
         case .retry:
             if ui.phase == .review, ui.issue?.kind == .saveFailure {
                 await saveToPhotos()
-            } else if ui.phase == .permission || ui.phase == .unavailable {
-                if capture.availableLenses.isEmpty { await handle(.prepare) }
-                else if capture.currentSnapshot != nil { await resumeCapture() }
-                else { await startCapture() }
+            } else if capture.currentSnapshot != nil {
+                await resumeSavedSweep()
+            } else {
+                await preparePreview()
             }
         case .openSettings:
             guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
@@ -123,17 +112,14 @@ final class UltraWideCoordinator {
         }
     }
 
-    private func startCapture() async {
-        // A saved session must be resumed or explicitly discarded first.
-        guard capture.currentSnapshot == nil else {
-            ui.isStarting = false
-            synchronize()
-            return
-        }
+    private func preparePreview() async {
+        guard capture.currentSnapshot == nil else { return }
         let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
         let target = CaptureTarget(rawValue: ui.selectedTarget.rawValue) ?? .half
+        ui.isStarting = true
         do {
-            try await capture.start(lens: lens, target: target, orientation: currentOrientation())
+            try await capture.preparePreview(lens: lens, target: target,
+                                             orientation: currentOrientation())
             ui.issue = nil
             ui.banner = nil
             synchronize()
@@ -143,73 +129,64 @@ final class UltraWideCoordinator {
         }
     }
 
-    private func resumeCapture() async {
+    private func beginOrResumeSweep() async {
+        ui.isStarting = true
         do {
-            try await capture.resume()
+            if capture.currentSnapshot == nil && capture.status != .ready {
+                let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
+                let target = CaptureTarget(rawValue: ui.selectedTarget.rawValue) ?? .half
+                try await capture.preparePreview(lens: lens, target: target,
+                                                 orientation: currentOrientation())
+            }
+            if capture.status == .reviewing {
+                try await capture.resumeSweep()
+            } else if capture.status == .paused || capture.status.isFailure {
+                try await capture.resume()
+            }
+            if capture.status == .ready {
+                try await capture.beginSweep()
+            }
             ui.issue = nil
+            ui.banner = nil
+            automaticAssemblyKey = nil
             synchronize()
         } catch {
             ui.isStarting = false
-            showCaptureError(error)
+            if !(error is CancellationError) { showCaptureError(error, fatal: capture.status.isFailure) }
+            synchronize()
         }
     }
 
-    private func takePhoto() async {
-        guard !isTakingPhoto else { return }
-        isTakingPhoto = true
-        defer {
-            isTakingPhoto = false
-            synchronize()
-        }
+    private func resumeSavedSweep() async {
+        ui.isStarting = true
         do {
-            let frame: CapturedFrame
-            if capture.completedCount == 0 {
-                frame = try await capture.anchorCenterAndCapture()
-            } else {
-                frame = try await capture.captureCurrentView()
-            }
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            if frame.quality == .soft {
-                ui.banner = message("Vue légèrement floue : vous pourrez la refaire au second passage.",
-                                    "This view is a little soft. You can retake it in the second pass.")
-            } else if frame.quality == .dark {
-                ui.banner = message("Vue sombre : envisagez une reprise si le résultat manque de détail.",
-                                    "This view is dark. Consider a retake if it lacks detail.")
-            } else {
-                ui.banner = nil
+            try await capture.resume()
+            if capture.status == .ready, capture.currentSnapshot?.isPassOpen == true {
+                try await capture.beginSweep()
             }
             ui.issue = nil
-            autoAttemptedSlotID = nil
+            automaticAssemblyKey = nil
+            synchronize()
         } catch {
-            if !(error is CancellationError), capture.status != .idle, capture.status != .paused {
-                showCaptureError(error, fatal: false)
-            }
+            ui.isStarting = false
+            if !(error is CancellationError) { showCaptureError(error, fatal: capture.status.isFailure) }
+            synchronize()
         }
     }
 
     private func assemble() async {
-        guard let snapshot = capture.currentSnapshot, snapshot.isComplete else {
+        guard !isAssembling else { return }
+        guard let snapshot = capture.currentSnapshot, snapshot.frames.count >= 2 else {
             ui.phase = .passReview
             showCaptureError(CaptureError.incompletePass, fatal: false)
             return
         }
+        isAssembling = true
+        defer { isAssembling = false }
         ui.phase = .processing
         ui.issue = nil
         ui.processingProgress = 0
-        autoCaptureTask?.cancel()
 
-        let ordered = snapshot.slots.compactMap { slot -> (CaptureSlot, CapturedFrame)? in
-            guard let frame = slot.frame else { return nil }
-            return (slot, frame)
-        }
-        let inputs = ordered.map { _, frame in
-            StitchInput(
-                url: frame.fileURL,
-                yawRadians: frame.yawDegrees * .pi / 180,
-                pitchRadians: frame.pitchDegrees * .pi / 180,
-                rollRadians: frame.rollDegrees * .pi / 180
-            )
-        }
         let outputURL: URL
         do {
             let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -217,10 +194,19 @@ final class UltraWideCoordinator {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             outputURL = folder.appendingPathComponent("\(snapshot.sessionID.uuidString)-\(UUID().uuidString).heic")
         } catch {
+            ui.processingProgress = nil
             showStitchError(error)
             return
         }
 
+        let inputs = snapshot.frames.map { frame in
+            StitchInput(
+                url: frame.fileURL,
+                yawRadians: frame.yawDegrees * .pi / 180,
+                pitchRadians: frame.pitchDegrees * .pi / 180,
+                rollRadians: frame.rollDegrees * .pi / 180
+            )
+        }
         do {
             let result = try await stitcher.stitch(
                 inputs: inputs,
@@ -245,28 +231,24 @@ final class UltraWideCoordinator {
             ui.saveState = .idle
             ui.processingProgress = nil
             ui.phase = .review
-            let omitted = result.rejectedFrameIndices.compactMap { index in
-                ordered.indices.contains(index) ? ordered[index].0.id : nil
-            }
-            rejectedSlotIDs = Set(omitted)
-            if !omitted.isEmpty {
-                ui.banner = message("Certaines vues ont été écartées de l’assemblage.",
-                                    "Some views were omitted from the stitch.")
-            }
+            ui.banner = nil
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             ui.processingProgress = nil
-            if case StitchingFailure.insufficientOverlap(let indices) = error {
-                rejectedSlotIDs = Set(indices.compactMap { index in
-                    ordered.indices.contains(index) ? ordered[index].0.id : nil
-                })
-            } else if case StitchingFailure.incompleteCoverage(let indices) = error {
-                rejectedSlotIDs = Set(indices.compactMap { index in
-                    ordered.indices.contains(index) ? ordered[index].0.id : nil
-                })
-            }
             showStitchError(error)
         }
+    }
+
+    private func scheduleAutomaticAssembly() {
+        guard capture.status == .reviewing, let snapshot = capture.currentSnapshot,
+              snapshot.frames.count >= 2, !isAssembling,
+              ui.phase != .review, ui.phase != .processing else { return }
+        let key = "\(snapshot.sessionID.uuidString):\(snapshot.frames.count)"
+        guard automaticAssemblyKey != key else { return }
+        automaticAssemblyKey = key
+        ui.phase = .processing
+        Task { [weak self] in await self?.assemble() }
     }
 
     private func saveToPhotos() async {
@@ -277,8 +259,8 @@ final class UltraWideCoordinator {
         guard status == .authorized || status == .limited else {
             ui.saveState = .idle
             ui.issue = CaptureUIIssue(kind: .photoLibraryPermission,
-                                      detail: message("Autorisez l’ajout à Photos dans Réglages, ou utilisez Partager.",
-                                                      "Allow adding to Photos in Settings, or use Share."),
+                                      detail: message("Autorisez Photos dans Réglages, ou utilisez Partager.",
+                                                      "Allow Photos in Settings, or use Share."),
                                       canRetry: false)
             return
         }
@@ -300,71 +282,43 @@ final class UltraWideCoordinator {
         } catch {
             ui.saveState = .idle
             ui.issue = CaptureUIIssue(kind: .saveFailure,
-                                      detail: message("Impossible d’enregistrer dans Photos. Réessayez ou utilisez Partager.",
-                                                      "Couldn’t save to Photos. Try again or use Share."),
+                                      detail: message("Enregistrement impossible. Réessayez ou partagez l’image.",
+                                                      "Couldn’t save. Try again or share the image."),
                                       canRetry: true)
         }
     }
 
     private func synchronize() {
         ui.availableLenses = capture.availableLenses.compactMap { CaptureUILens(rawValue: $0.rawValue) }
+        ui.hasActiveSession = capture.currentSnapshot != nil
         ui.hasRecoverableSession = capture.hasRecoverableSession
         if let plan = capture.plan {
-            ui.selectedLens = CaptureUILens(rawValue: plan.lens.rawValue) ?? .wide
-            ui.selectedTarget = CaptureUITarget(rawValue: plan.target.rawValue) ?? .half
-            ui.previewRotationAngle = plan.orientation.rotationAngle
-            ui.previewSession = capture.previewSession
-        } else {
-            ui.previewSession = nil
-            updateAvailableTargets()
-        }
-        ui.currentPass = capture.currentPass
-        ui.plannedPhotos = capture.plan?.expectedFrameCount ?? 0
-        ui.capturedPhotos = capture.completedCount
-        ui.refinementPhotos = capture.currentSnapshot?.retakeCount ?? 0
-        ui.remainingRetakes = capture.remainingRetakes
-        ui.canRefine = capture.status == .reviewing
-            && capture.currentPass == 1 && capture.remainingRetakes > 0
-        ui.canFinishPass = capture.status == .ready
-            && (capture.currentSnapshot?.isComplete ?? false)
-        ui.canCapture = capture.status == .ready && !capture.orientationNeedsCorrection
-            && !capture.isCenterAnchoring
-            && (capture.completedCount == 0 || (capture.guidance?.canCapture ?? false))
-
-        let currentID = capture.currentSlot?.id
-        ui.coverage = capture.slots.map { slot in
-            let state: CaptureUICoverageCell.State
-            if slot.id == currentID && capture.status == .ready {
-                state = .current
-            } else if let frame = slot.frame {
-                state = rejectedSlotIDs.contains(slot.id) || frame.quality == .soft || frame.quality == .dark
-                    ? .needsRetake : .captured
-            } else {
-                state = .pending
+            if capture.currentSnapshot != nil {
+                ui.selectedLens = CaptureUILens(rawValue: plan.lens.rawValue) ?? .wide
+                ui.selectedTarget = CaptureUITarget(rawValue: plan.target.rawValue) ?? .half
             }
-            return CaptureUICoverageCell(id: slot.id, row: slot.row, column: slot.column, state: state)
+            ui.previewRotationAngle = plan.orientation.rotationAngle
         }
-
-        if capture.completedCount == 0 && capture.status == .ready {
-            ui.guidance = CaptureUIGuidance(hasTarget: false, isAligned: true,
-                                            isStable: false, isAutoCaptureEnabled: false)
-        } else if let guidance = capture.guidance, let plan = capture.plan {
-            ui.guidance = CaptureUIGuidance(
-                hasTarget: true,
-                horizontalOffset: clip(guidance.horizontalErrorDegrees / max(plan.horizontalStep, 4)),
-                verticalOffset: clip(-guidance.verticalErrorDegrees / max(plan.verticalStep, 4)),
-                isAligned: guidance.isAligned,
-                isStable: guidance.isStable,
-                isCapturing: capture.status == .capturing,
-                isAutoCaptureEnabled: true
-            )
+        switch capture.status {
+        case .ready, .capturing, .recalibrating:
+            ui.previewSession = capture.previewSession
+        default:
+            ui.previewSession = nil
+        }
+        updateAvailableTargets()
+        if let coverage = capture.coverage {
+            ui.sweep.viewRect = coverage.viewRect
+            ui.sweep.coveredRects = coverage.coveredRects
+            ui.sweep.coverageFraction = coverage.fraction
         } else {
-            ui.guidance = CaptureUIGuidance(hasTarget: currentID != nil,
-                                            isCapturing: capture.status == .capturing)
+            ui.sweep = CaptureUISweep()
         }
+        ui.sweep.isRecording = capture.status == .capturing
+        ui.sweep.isComplete = capture.currentSnapshot?.isComplete ?? false
+        ui.sweep.isFinishing = isAssembling || ui.phase == .processing
+
         if capture.orientationNeedsCorrection {
-            ui.banner = message("Remettez l’iPhone dans l’orientation du début de session.",
-                                "Return the iPhone to the orientation used at the start.")
+            ui.banner = message("Gardez l’orientation du départ.", "Keep the starting orientation.")
             orientationBannerActive = true
         } else if orientationBannerActive {
             ui.banner = nil
@@ -373,7 +327,7 @@ final class UltraWideCoordinator {
 
         if ui.phase != .processing && ui.phase != .review {
             switch capture.status {
-            case .idle, .paused:
+            case .idle, .paused, .ready:
                 ui.phase = .setup
             case .preparing:
                 if ui.phase != .passReview { ui.phase = .setup }
@@ -382,63 +336,33 @@ final class UltraWideCoordinator {
                 ui.reanchorImage = capture.calibrationFrameURL.flatMap {
                     makeThumbnail(url: $0, maxPixelSize: 900)
                 }
-            case .ready, .capturing:
+            case .capturing:
                 ui.phase = .capturing
             case .reviewing:
                 ui.phase = .passReview
             case .failed:
+                if ui.issue == nil {
+                    ui.issue = CaptureUIIssue(
+                        kind: .captureFailure,
+                        detail: message("La prise de vue a été interrompue. Réessayez.",
+                                        "Capture was interrupted. Try again."),
+                        canRetry: true
+                    )
+                }
                 ui.phase = ui.issue?.kind == .cameraPermission ? .permission : .unavailable
             }
         }
-        if capture.status != .preparing { ui.isStarting = false }
-        scheduleAutomaticCapture()
+        if capture.status != .preparing && !capture.isCenterAnchoring { ui.isStarting = false }
+        scheduleAutomaticAssembly()
     }
 
     private func updateAvailableTargets() {
         let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
-        let orientation = capture.plan?.orientation ?? currentOrientation()
+        let orientation = capture.currentSnapshot?.plan.orientation ?? currentOrientation()
         ui.availableTargets = capture.availableTargets(for: lens, orientation: orientation)
             .compactMap { CaptureUITarget(rawValue: $0.rawValue) }
         if !ui.availableTargets.contains(ui.selectedTarget) {
             ui.selectedTarget = ui.availableTargets.first ?? .half
-        }
-        updateEstimate()
-    }
-
-    private func updateEstimate() {
-        let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
-        let target = CaptureTarget(rawValue: ui.selectedTarget.rawValue) ?? .half
-        let orientation = capture.plan?.orientation ?? currentOrientation()
-        if let wideFOV = CameraService.horizontalFieldOfView(for: .wide),
-           let lensFOV = CameraService.horizontalFieldOfView(for: lens),
-           let plan = CapturePlan.make(lens: lens, target: target,
-                                       orientation: orientation, wideHorizontalFOV: wideFOV,
-                                       lensHorizontalFOV: lensFOV) {
-            ui.estimatedPhotos = plan.expectedFrameCount
-        } else {
-            ui.estimatedPhotos = 0
-        }
-    }
-
-    private func scheduleAutomaticCapture() {
-        guard ui.phase == .capturing, capture.status == .ready,
-              capture.completedCount > 0,
-              let guidance = capture.guidance, guidance.canCapture,
-              let slotID = capture.currentSlot?.id,
-              !isTakingPhoto else {
-            if capture.guidance?.canCapture != true { autoAttemptedSlotID = nil }
-            return
-        }
-        guard autoAttemptedSlotID != slotID else { return }
-        autoAttemptedSlotID = slotID
-        autoCaptureTask?.cancel()
-        autoCaptureTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled, let self,
-                  self.capture.status == .ready,
-                  self.capture.currentSlot?.id == slotID,
-                  self.capture.guidance?.canCapture == true else { return }
-            await self.takePhoto()
         }
     }
 
@@ -461,65 +385,26 @@ final class UltraWideCoordinator {
         ui.phase = .passReview
         let detail: CaptureUIMessage
         switch error {
-        case StitchingFailure.insufficientOverlap:
-            detail = rejectedSlotIDs.isEmpty
-                ? message("Certaines vues ne se recouvrent pas assez. Reprenez-les en tournant plus lentement.",
-                          "Some views do not overlap enough. Retake them while rotating more slowly.")
-                : message("Certaines vues ne se recouvrent pas assez. Reprenez les vues signalées.",
-                          "Some views do not overlap enough. Retake the marked views.")
         case StitchingFailure.incompleteCoverage:
-            detail = rejectedSlotIDs.isEmpty
-                ? message("Le balayage ne couvre pas le cadrage demandé. Reprenez les vues des bords.",
-                          "The sweep does not cover the requested field. Retake the edge views.")
-                : message("Le balayage ne couvre pas le cadrage demandé. Reprenez les vues des bords signalées.",
-                          "The sweep does not cover the requested field. Retake the marked edge views.")
+            detail = message("Complétez les bords du cadre.", "Fill the frame edges.")
+        case StitchingFailure.insufficientOverlap:
+            detail = message("Balayez plus lentement les zones manquantes.",
+                             "Sweep the missing areas more slowly.")
         case StitchingFailure.invalidGeometry:
-            detail = message("Les vues n’ont pas pu être alignées. Reprenez-les en tournant lentement autour de l’iPhone.",
-                             "The views could not be aligned. Retake them while rotating slowly around the iPhone.")
+            detail = message("Bougez moins l’iPhone pendant le balayage.",
+                             "Move the iPhone more steadily during the sweep.")
         default:
-            detail = message("L’assemblage a échoué. Reprenez les vues signalées ou recommencez.",
-                             "Stitching failed. Retake the marked views or start again.")
+            detail = message("Assemblage impossible. Continuez le balayage.",
+                             "Couldn’t stitch. Continue the sweep.")
         }
-        ui.issue = CaptureUIIssue(kind: .stitchingFailure,
-                                  detail: detail,
-                                  canRetry: false)
-        synchronize()
-    }
-
-    private func captureErrorMessage(_ error: Error) -> CaptureUIMessage {
-        guard let error = error as? CaptureError else {
-            return message("La prise de vue a échoué. Réessayez.",
-                           "Capture failed. Please try again.")
-        }
-        let english: String
-        switch error {
-        case .cameraPermissionDenied: english = "Allow camera access in Settings."
-        case .cameraUnavailable: english = "The camera is temporarily unavailable."
-        case .lensUnavailable: english = "This lens is unavailable on this iPhone."
-        case .targetUnavailable: english = "This field would need too many photos with this lens."
-        case .cameraConfigurationFailed: english = "The camera could not be prepared."
-        case .motionUnavailable: english = "Motion sensors are unavailable."
-        case .notReady: english = "Capture is not ready yet."
-        case .notAligned: english = "Align the guide and hold your iPhone still."
-        case .orientationChanged: english = "Return the iPhone to the starting orientation."
-        case .noCurrentSlot: english = "All planned views have been captured."
-        case .incompletePass: english = "Some views still need to be captured."
-        case .retakeLimitReached: english = "The six-retake limit has been reached."
-        case .invalidSlot: english = "This view is not part of the session."
-        case .noSavedSession: english = "There is no session to resume."
-        case .corruptSavedSession: english = "The saved session is incomplete."
-        case .photoDataUnavailable: english = "The photo could not be read."
-        case .diskWriteFailed: english = "The photo could not be saved on this iPhone."
-        }
-        return message(error.localizedDescription, english)
+        ui.issue = CaptureUIIssue(kind: .stitchingFailure, detail: detail, canRetry: false)
     }
 
     private func resetCapture() {
-        autoCaptureTask?.cancel()
         capture.discard()
         if let output = lastOutputURL { try? FileManager.default.removeItem(at: output) }
         lastOutputURL = nil
-        rejectedSlotIDs.removeAll()
+        automaticAssemblyKey = nil
         ui.resultURL = nil
         ui.resultPreview = nil
         ui.resultPixelSize = nil
@@ -529,6 +414,7 @@ final class UltraWideCoordinator {
         ui.banner = nil
         ui.phase = .setup
         synchronize()
+        Task { [weak self] in await self?.preparePreview() }
     }
 
     private func currentOrientation() -> CaptureOrientation {
@@ -551,11 +437,36 @@ final class UltraWideCoordinator {
         return UIImage(cgImage: image)
     }
 
+    private func captureErrorMessage(_ error: Error) -> CaptureUIMessage {
+        guard let error = error as? CaptureError else {
+            return message("La prise de vue a échoué. Réessayez.", "Capture failed. Try again.")
+        }
+        let english: String
+        switch error {
+        case .cameraPermissionDenied: english = "Allow camera access in Settings."
+        case .cameraUnavailable: english = "The camera is temporarily unavailable."
+        case .lensUnavailable: english = "This lens is unavailable on this iPhone."
+        case .targetUnavailable: english = "This field is unavailable with this lens."
+        case .cameraConfigurationFailed: english = "The camera could not be prepared."
+        case .motionUnavailable: english = "Motion sensors are unavailable."
+        case .notReady: english = "Wait for the camera to be ready."
+        case .notAligned: english = "Hold the iPhone still."
+        case .orientationChanged: english = "Return to the starting orientation."
+        case .noCurrentSlot: english = "No view is selected."
+        case .incompletePass: english = "Sweep a little further before stopping."
+        case .retakeLimitReached: english = "The sweep reached its frame limit."
+        case .invalidSlot: english = "This frame is unavailable."
+        case .noSavedSession: english = "There is no session to resume."
+        case .corruptSavedSession: english = "The saved session is incomplete."
+        case .photoDataUnavailable: english = "A video frame could not be read."
+        case .diskWriteFailed: english = "The frame could not be saved on this iPhone."
+        }
+        return message(error.localizedDescription, english)
+    }
+
     private func message(_ french: String, _ english: String) -> CaptureUIMessage {
         CaptureUIMessage(french: french, english: english)
     }
-
-    private func clip(_ value: Double) -> Double { min(1, max(-1, value)) }
 }
 
 private enum PhotoSaveError: Error { case failed }

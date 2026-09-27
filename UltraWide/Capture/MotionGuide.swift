@@ -1,5 +1,6 @@
 import CoreMotion
 import Foundation
+import QuartzCore
 
 struct MotionReading: Sendable {
     let yawDegrees: Double
@@ -79,10 +80,39 @@ final class MotionGuide {
         samplingTask = nil
     }
 
-    func recenter() throws {
+    @discardableResult
+    func recenter() throws -> MotionReading {
         guard matrixMapsDeviceToReference != nil,
-              let motion = manager.deviceMotion else { throw CaptureError.motionUnavailable }
+              let motion = manager.deviceMotion,
+              abs(CACurrentMediaTime() - motion.timestamp) < 0.3 else {
+            throw CaptureError.motionUnavailable
+        }
         reference = motion.attitude.rotationMatrix
+        // The motion that defines the new reference has exactly zero angular
+        // displacement. Publish it now; the 30 Hz timer may arrive too late
+        // for the center image selected at this tap.
+        let rate = motion.rotationRate
+        let centered = MotionReading(
+            yawDegrees: 0,
+            pitchDegrees: 0,
+            rollDegrees: 0,
+            angularSpeed: sqrt(rate.x * rate.x + rate.y * rate.y + rate.z * rate.z),
+            orientationMatchesConfiguration: orientationMatches(motion.gravity),
+            sampleTimestamp: motion.timestamp
+        )
+        onReading?(centered)
+        return centered
+    }
+
+    private func orientationMatches(_ gravity: CMAcceleration) -> Bool {
+        let gravityInScreenPlane = hypot(gravity.x, gravity.y)
+        let expectedDownComponent: Double = switch orientation {
+        case .portrait: -gravity.y
+        case .landscapeLeft: -gravity.x
+        case .landscapeRight: gravity.x
+        }
+        return gravityInScreenPlane < 0.45
+            || expectedDownComponent / gravityInScreenPlane > 0.70
     }
 
     private func sample() {
@@ -134,21 +164,13 @@ final class MotionGuide {
         let expectedUp = (initialUp - forward * initialUp.dot(forward)).normalized
         let roll = atan2(expectedUp.cross(up).dot(forward), expectedUp.dot(up))
         let rate = motion.rotationRate
-        let gravityInScreenPlane = hypot(gravity.x, gravity.y)
-        let expectedDownComponent: Double = switch orientation {
-        case .portrait: -gravity.y
-        case .landscapeLeft: -gravity.x
-        case .landscapeRight: gravity.x
-        }
-        let orientationMatches = gravityInScreenPlane < 0.45
-            || expectedDownComponent / gravityInScreenPlane > 0.70
         onReading?(
             MotionReading(
                 yawDegrees: yaw * 180 / .pi,
                 pitchDegrees: pitch * 180 / .pi,
                 rollDegrees: roll * 180 / .pi,
                 angularSpeed: sqrt(rate.x * rate.x + rate.y * rate.y + rate.z * rate.z),
-                orientationMatchesConfiguration: orientationMatches,
+                orientationMatchesConfiguration: orientationMatches(gravity),
                 sampleTimestamp: motion.timestamp
             )
         )

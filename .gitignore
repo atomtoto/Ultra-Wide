@@ -5,3 +5,5 @@ DerivedData/
 xcuserdata/
 .swiftpm/
 TestResults/
+__pycache__/
+*.pyc

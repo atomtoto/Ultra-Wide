@@ -146,13 +146,6 @@ struct UltraWideRootView: View {
                     .accessibilityHidden(true)
             }
             Spacer()
-            Text(model.selectedTarget.magnification(for: locale))
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .padding(.horizontal, 13)
-                .frame(height: 36)
-                .background(CameraPalette.surface, in: Capsule())
-                .accessibilityLabel(tr("Champ final", "Final field of view") + " " + model.selectedTarget.magnification(for: locale))
         }
         .buttonStyle(.plain)
     }

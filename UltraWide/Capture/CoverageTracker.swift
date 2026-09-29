@@ -7,10 +7,12 @@ struct CoverageTracker {
     private let plan: CapturePlan
     private let overscan = 0.025
     private(set) var imageRects: [CGRect] = []
+    private var cachedFraction: Double = 0
 
     init(plan: CapturePlan, frames: [CapturedFrame] = []) {
         self.plan = plan
         imageRects = frames.map { footprint(yaw: $0.yawDegrees, pitch: $0.pitchDegrees) }
+        cachedFraction = fraction(adding: nil)
     }
 
     func footprint(yaw: Double, pitch: Double) -> CGRect {
@@ -43,7 +45,7 @@ struct CoverageTracker {
         )
     }
 
-    var fraction: Double { fraction(adding: nil) }
+    var fraction: Double { cachedFraction }
 
     private func fraction(adding candidate: CGRect?) -> Double {
         let target = CGRect(x: -overscan, y: -overscan,
@@ -109,14 +111,15 @@ struct CoverageTracker {
         let distinct = imageRects.allSatisfy { previous in
             let dx = abs(candidate.midX - previous.midX) / max(candidate.width, previous.width)
             let dy = abs(candidate.midY - previous.midY) / max(candidate.height, previous.height)
-            return hypot(dx, dy) >= (repairMode ? 0.11 : filled > 0.90 ? 0.12 : 0.25)
+            return hypot(dx, dy) >= (repairMode ? 0.11 : filled > 0.90 ? 0.12 : 0.33)
         }
         guard distinct else { return false }
         if repairMode { return true }
-        return fraction(adding: candidate) - filled >= (filled > 0.90 ? 0.0001 : 0.008)
+        return fraction(adding: candidate) - filled >= (filled > 0.90 ? 0.0001 : 0.012)
     }
 
     mutating func include(yaw: Double, pitch: Double) {
         imageRects.append(footprint(yaw: yaw, pitch: pitch))
+        cachedFraction = fraction(adding: nil)
     }
 }

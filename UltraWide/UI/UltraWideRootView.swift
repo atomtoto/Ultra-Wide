@@ -189,6 +189,8 @@ struct UltraWideRootView: View {
                         } label: {
                             Text(target.magnification(for: locale))
                                 .font(.subheadline.weight(.semibold))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
                                 .frame(maxWidth: .infinity, minHeight: 44)
                                 .foregroundStyle(model.selectedTarget == target ? CameraPalette.accent : .white)
                                 .background(.black.opacity(0.42), in: Capsule())
@@ -222,8 +224,20 @@ struct UltraWideRootView: View {
                         .accessibilityHidden(true)
                 }
             }
-            CoverageMap(sweep: model.sweep, locale: locale)
-                .aspectRatio(isLandscape ? 4.0 / 3.0 : 3.0 / 4.0, contentMode: .fit)
+            Group {
+                if model.isSinglePhoto && !model.hasActiveSession {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(CameraPalette.accent, lineWidth: 2)
+                        .overlay {
+                            Image(systemName: "camera")
+                                .font(.system(size: 28, weight: .light))
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+                } else {
+                    CoverageMap(sweep: model.sweep, locale: locale)
+                }
+            }
+            .aspectRatio(isLandscape ? 4.0 / 3.0 : 3.0 / 4.0, contentMode: .fit)
             Text(fieldHint)
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.white)
@@ -240,7 +254,9 @@ struct UltraWideRootView: View {
         if model.phase == .setup {
             return model.hasActiveSession
                 ? tr("Reprendre", "Resume")
-                : tr("Pointez le centre", "Point at the center")
+                : model.isSinglePhoto
+                    ? tr("Photo prête", "Ready to capture")
+                    : tr("Pointez le centre", "Point at the center")
         }
         if model.sweep.isComplete { return tr("Couverture complète", "Coverage complete") }
         return tr("Balayez librement", "Sweep freely")
@@ -320,6 +336,7 @@ struct UltraWideRootView: View {
     private var shutterAccessibilityLabel: String {
         if model.phase == .capturing { return tr("Arrêter le balayage", "Stop sweep") }
         if model.hasActiveSession { return tr("Reprendre le balayage", "Resume sweep") }
+        if model.isSinglePhoto { return tr("Prendre la photo", "Take photo") }
         return tr("Démarrer le balayage", "Start sweep")
     }
 

@@ -317,7 +317,7 @@ static BlendPlan BuildBlendPlan(
     const cv::Rect2f &globalBounds
 ) {
     BlendPlan plan;
-    plan.scale = std::min(1.0, 512.0 / std::max(globalBounds.width, globalBounds.height));
+    plan.scale = std::min(1.0, 256.0 / std::max(globalBounds.width, globalBounds.height));
     const int width = std::max(1, static_cast<int>(std::ceil(globalBounds.width * plan.scale)) + 2);
     const int height = std::max(1, static_cast<int>(std::ceil(globalBounds.height * plan.scale)) + 2);
     std::vector<cv::Mat> projectedImages, originalMasks;
@@ -375,6 +375,8 @@ static BlendPlan BuildBlendPlan(
     }
 
     try {
+        // Solve seams on a compact preview. The source frame geometry and
+        // full-resolution render retain their original precision.
         cv::detail::GraphCutSeamFinder finder(cv::detail::GraphCutSeamFinderBase::COST_COLOR_GRAD);
         finder.find(seamImages, origins, seamMasks);
     } catch (const cv::Exception &) {
@@ -467,20 +469,6 @@ static cv::Mat LowFrequencyCorrectionFromRenderedImage(
         }
     }
     return smoothedDifference;
-}
-
-static cv::Vec3f SampleCorrection(const cv::Mat &correction, double x, double y) {
-    x = std::clamp(x, 0.0, static_cast<double>(correction.cols - 1));
-    y = std::clamp(y, 0.0, static_cast<double>(correction.rows - 1));
-    const int x0 = static_cast<int>(x), y0 = static_cast<int>(y);
-    const int x1 = std::min(x0 + 1, correction.cols - 1);
-    const int y1 = std::min(y0 + 1, correction.rows - 1);
-    const float fx = static_cast<float>(x - x0), fy = static_cast<float>(y - y0);
-    const cv::Vec3f top = correction.at<cv::Vec3f>(y0, x0) * (1 - fx) +
-                          correction.at<cv::Vec3f>(y0, x1) * fx;
-    const cv::Vec3f bottom = correction.at<cv::Vec3f>(y1, x0) * (1 - fx) +
-                             correction.at<cv::Vec3f>(y1, x1) * fx;
-    return top * (1 - fy) + bottom * fy;
 }
 
 static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) {
@@ -589,7 +577,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         stage = "registration";
         cv::Ptr<cv::Stitcher> stitcher = cv::Stitcher::create(cv::Stitcher::PANORAMA);
         stitcher->setFeaturesFinder(cv::SIFT::create(1800));
-        stitcher->setRegistrationResol(0.8);
+        stitcher->setRegistrationResol(0.6);
         stitcher->setPanoConfidenceThresh(0.65);
         stitcher->setWaveCorrection(false);
         stitcher->setWarper(cv::makePtr<cv::PlaneWarper>());
@@ -879,7 +867,9 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         const auto exposureGains = EstimateExposureGains(
             geometry, thumbnails, globalBounds, previewW, previewH, previewScale
         );
+        if (!Report(progress, 0.46, error)) return nil;
         const BlendPlan blendPlan = BuildBlendPlan(geometry, thumbnails, exposureGains, globalBounds);
+        if (!Report(progress, 0.49, error)) return nil;
         std::vector<cv::Size> thumbnailSizes;
         thumbnailSizes.reserve(thumbnails.size());
         for (const auto &thumbnail : thumbnails) thumbnailSizes.push_back(thumbnail.size());
@@ -891,6 +881,10 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         const double seamStartY = (cropWorld.y - globalBounds.y) * blendPlan.scale;
         const double seamStepX = blendPlan.scale / scaleX;
         const double seamStepY = blendPlan.scale / scaleY;
+        std::vector<int> seamColumns(outputW);
+        for (int x = 0; x < outputW; ++x) {
+            seamColumns[x] = static_cast<int>(std::round(seamStartX + x * seamStepX));
+        }
 
         stage = "full-resolution render";
         for (size_t frameNumber = 0; frameNumber < geometry.size(); ++frameNumber) {
@@ -933,6 +927,16 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                 const double h10 = inverseH.at<double>(1, 0), h11 = inverseH.at<double>(1, 1), h12 = inverseH.at<double>(1, 2);
                 const double h20 = inverseH.at<double>(2, 0), h21 = inverseH.at<double>(2, 1), h22 = inverseH.at<double>(2, 2);
                 const double featherWidth = std::max(8.0, std::min(source.cols, source.rows) * 0.09);
+                const cv::Mat &seamWeight = blendPlan.seamWeights[frameNumber];
+                std::array<std::array<uint8_t, 256>, 3> colorLUT;
+                for (int channel = 0; channel < 3; ++channel) {
+                    for (int value = 0; value < 256; ++value) {
+                        colorLUT[channel][value] = static_cast<uint8_t>(std::clamp(
+                            static_cast<int>(std::round(value * exposureGains[frameNumber][channel])),
+                            0, 255
+                        ));
+                    }
+                }
 
                 for (int tileY = top / kTileSide * kTileSide; tileY < bottom; tileY += kTileSide) {
                     for (int tileX = left / kTileSide * kTileSide; tileX < right; tileX += kTileSide) {
@@ -947,6 +951,9 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                             cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
                         for (int y = std::max(top, tileY); y < std::min(bottom, tileY + tileH); ++y) {
                             const cv::Vec3b *row = tile.ptr<cv::Vec3b>(y - tileY);
+                            const int seamY = static_cast<int>(std::round(seamStartY + y * seamStepY));
+                            const uint8_t *seamRow = seamY >= 0 && seamY < seamWeight.rows
+                                ? seamWeight.ptr<uint8_t>(seamY) : nullptr;
                             for (int x = std::max(left, tileX); x < std::min(right, tileX + tileW); ++x) {
                                 const double denominator = h20 * x + h21 * y + h22;
                                 if (std::abs(denominator) < 1e-8) continue;
@@ -959,12 +966,9 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                                               source.rows - 1.0 - sourceY});
                                 const size_t offset = static_cast<size_t>(y) * outputW + x;
                                 const uint16_t previous = weights[offset];
-                                const cv::Mat &seamWeight = blendPlan.seamWeights[frameNumber];
-                                const int seamX = static_cast<int>(std::round(seamStartX + x * seamStepX));
-                                const int seamY = static_cast<int>(std::round(seamStartY + y * seamStepY));
-                                const uint8_t softMask = seamX >= 0 && seamY >= 0 &&
-                                    seamX < seamWeight.cols && seamY < seamWeight.rows
-                                    ? seamWeight.at<uint8_t>(seamY, seamX) : 0;
+                                const int seamX = seamColumns[x];
+                                const uint8_t softMask = seamRow && seamX >= 0 && seamX < seamWeight.cols
+                                    ? seamRow[seamX] : 0;
                                 if (!softMask && previous) continue;
                                 const uint16_t contribution = static_cast<uint16_t>(std::clamp(
                                     256.0 * edge / featherWidth *
@@ -975,18 +979,12 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                 uint8_t *pixel = pixels + offset * 4;
                                 if (previous == 0) {
                                     for (int channel = 0; channel < 3; ++channel) {
-                                        pixel[channel] = static_cast<uint8_t>(std::clamp(
-                                            static_cast<int>(std::round(color[channel] * exposureGains[frameNumber][channel])),
-                                            0, 255
-                                        ));
+                                        pixel[channel] = colorLUT[channel][color[channel]];
                                     }
                                     pixel[3] = 255;
                                 } else {
                                     for (int channel = 0; channel < 3; ++channel) {
-                                        const uint32_t corrected = static_cast<uint32_t>(std::clamp(
-                                            static_cast<int>(std::round(color[channel] * exposureGains[frameNumber][channel])),
-                                            0, 255
-                                        ));
+                                        const uint32_t corrected = colorLUT[channel][color[channel]];
                                         pixel[channel] = static_cast<uint8_t>(
                                             (static_cast<uint32_t>(pixel[channel]) * previous +
                                              corrected * contribution + total / 2) / total
@@ -1017,23 +1015,33 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         const cv::Mat correctionMap = LowFrequencyCorrectionFromRenderedImage(
             blendPlan, pixels, outputW, outputH, cropWorld, globalBounds, scaleX, scaleY
         );
-        for (int y = 0; y < outputH; ++y) {
-            const double seamY = seamStartY + y * seamStepY;
-            for (int x = 0; x < outputW; ++x) {
-                const size_t offset = static_cast<size_t>(y) * outputW + x;
-                const cv::Vec3f colorCorrection = SampleCorrection(
-                    correctionMap, seamStartX + x * seamStepX, seamY
-                );
-                uint8_t *pixel = pixels + offset * 4;
-                for (int channel = 0; channel < 3; ++channel) {
-                    pixel[channel] = static_cast<uint8_t>(std::clamp(
-                        static_cast<int>(std::round(pixel[channel] +
-                                                    std::clamp(colorCorrection[channel], -40.0f, 40.0f))),
-                        0, 255
-                    ));
+        constexpr int kCorrectionRows = 128;
+        for (int firstY = 0; firstY < outputH; firstY += kCorrectionRows) {
+            const int rowCount = std::min(kCorrectionRows, outputH - firstY);
+            const cv::Mat destinationToPreview = (cv::Mat_<double>(2, 3) <<
+                seamStepX, 0, seamStartX,
+                0, seamStepY, seamStartY + firstY * seamStepY
+            );
+            cv::Mat correctionTile;
+            cv::warpAffine(correctionMap, correctionTile, destinationToPreview,
+                           cv::Size(outputW, rowCount), cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
+                           cv::BORDER_REPLICATE);
+            for (int localY = 0; localY < rowCount; ++localY) {
+                const int y = firstY + localY;
+                const cv::Vec3f *correctionRow = correctionTile.ptr<cv::Vec3f>(localY);
+                for (int x = 0; x < outputW; ++x) {
+                    const size_t offset = static_cast<size_t>(y) * outputW + x;
+                    uint8_t *pixel = pixels + offset * 4;
+                    for (int channel = 0; channel < 3; ++channel) {
+                        pixel[channel] = static_cast<uint8_t>(std::clamp(
+                            static_cast<int>(std::round(pixel[channel] +
+                                std::clamp(correctionRow[x][channel], -40.0f, 40.0f))),
+                            0, 255
+                        ));
+                    }
                 }
             }
-            if (y % 512 == 0 && !Report(progress, 0.90 + 0.04 * y / outputH, error)) return nil;
+            if (!Report(progress, 0.90 + 0.04 * (firstY + rowCount) / outputH, error)) return nil;
         }
         if (!Report(progress, 0.94, error)) return nil;
         stage = "HEIF export";

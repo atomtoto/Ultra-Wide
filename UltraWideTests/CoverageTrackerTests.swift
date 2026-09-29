@@ -87,7 +87,7 @@ final class CoverageTrackerTests: XCTestCase {
             if tracker.isComplete { break }
         }
         XCTAssertTrue(tracker.isComplete)
-        XCTAssertLessThanOrEqual(accepted, 60)
+        XCTAssertLessThanOrEqual(accepted, 40)
     }
 
     func testPortraitVideoSweepCompletesWithinFrameBudget() throws {
@@ -122,6 +122,6 @@ final class CoverageTrackerTests: XCTestCase {
             if tracker.isComplete { break }
         }
         XCTAssertTrue(tracker.isComplete)
-        XCTAssertLessThanOrEqual(accepted, 60)
+        XCTAssertLessThanOrEqual(accepted, 40)
     }
 }

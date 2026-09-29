@@ -19,6 +19,7 @@ final class CaptureUIModel {
     var availableLenses: [CaptureUILens] = [.wide]
     var selectedTarget: CaptureUITarget = .half
     var availableTargets: [CaptureUITarget] = [.half]
+    var isSinglePhoto = false
     var estimatedPhotos = 9
     var isStarting = false
 
@@ -94,6 +95,7 @@ enum CaptureUILens: String, CaseIterable, Identifiable, Equatable {
 
 enum CaptureUITarget: String, CaseIterable, Identifiable, Equatable {
     case half
+    case threeQuarters
     case one
     case onePointFive
     case two
@@ -104,6 +106,7 @@ enum CaptureUITarget: String, CaseIterable, Identifiable, Equatable {
         let separator = locale.captureLanguageIsFrench ? "," : "."
         return switch self {
         case .half: "0\(separator)5×"
+        case .threeQuarters: "0\(separator)75×"
         case .one: "1×"
         case .onePointFive: "1\(separator)5×"
         case .two: "2×"

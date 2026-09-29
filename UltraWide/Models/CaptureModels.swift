@@ -20,6 +20,7 @@ enum CaptureOrientation: String, Codable, Sendable {
 /// Desired field of view, expressed relative to the main wide camera.
 enum CaptureTarget: String, CaseIterable, Codable, Identifiable, Sendable {
     case half
+    case threeQuarters
     case one
     case onePointFive
     case two
@@ -29,6 +30,7 @@ enum CaptureTarget: String, CaseIterable, Codable, Identifiable, Sendable {
     var magnification: Double {
         switch self {
         case .half: 0.5
+        case .threeQuarters: 0.75
         case .one: 1.0
         case .onePointFive: 1.5
         case .two: 2.0
@@ -38,10 +40,18 @@ enum CaptureTarget: String, CaseIterable, Codable, Identifiable, Sendable {
     var label: String {
         switch self {
         case .half: "0,5×"
+        case .threeQuarters: "0,75×"
         case .one: "1×"
         case .onePointFive: "1,5×"
         case .two: "2×"
         }
+    }
+
+    /// Zoom required on the selected physical lens to match this field.
+    /// Values below one mean that a sweep is needed instead.
+    func zoomFactor(wideHorizontalFOV: Double, lensHorizontalFOV: Double) -> Double {
+        magnification * tan(lensHorizontalFOV * .pi / 360)
+            / tan(wideHorizontalFOV * .pi / 360)
     }
 }
 

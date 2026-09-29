@@ -1,15 +1,15 @@
 # Ultra Wide
 
-Ultra Wide est une application iPhone en SwiftUI qui compose une image plus large à partir d’un balayage continu de **l’objectif principal physique**. Le cadrage visé est celui d’un **0,5×** environ. Un téléobjectif physique peut aussi être choisi quand l’iPhone en possède un ; les cadrages proposés dépendent de sa focale et de la couverture réalisable.
+Ultra Wide est une application iPhone en SwiftUI qui produit les champs **0,5×, 0,75×, 1×, 1,5× et 2×** avec l’objectif principal physique. Un téléobjectif physique peut aussi être choisi quand l’iPhone en possède un ; les cadrages proposés dépendent de sa focale et de la couverture réalisable. Pour les champs déjà couverts par l’objectif, l’application prend directement une photo native. Pour les champs plus larges, elle compose une image à partir d’un balayage continu.
 
 ## Prise de vue
 
-1. Choisir l’objectif et le cadrage. L’aperçu est déjà actif : pointer le centre de la scène et toucher le bouton rond.
+1. Choisir l’objectif et le cadrage. L’aperçu est déjà actif : pointer le centre de la scène et toucher le bouton rond. Aux champs 1×, 1,5× et 2× sur le capteur principal, une seule photo est prise, sans assemblage.
 2. Balayer librement, dans n’importe quel ordre. Le petit cadre ambre représente le champ instantané de l’iPhone dans le cadre final ; les zones colorées sont déjà couvertes. Le flux vidéo est échantillonné en images nettes qui se recouvrent.
 3. La capture s’arrête et l’assemblage commence automatiquement lorsque tout le cadre est couvert. Le bouton rond permet aussi d’arrêter plus tôt. Si l’assemblage demande des vues supplémentaires, choisir **Continuer** pour compléter le même balayage.
 4. Examiner le résultat, l’enregistrer dans Photos ou le partager. Une session interrompue peut être reprise après réalignement de la vue centrale.
 
-La caméra choisie reste la même pendant tout le balayage. Le résultat est un assemblage géométrique en projection rectilinéaire, avec sélection des raccords, harmonisation et fusion multibande. Si les images ne se recouvrent pas assez ou si le cadrage demandé n’est pas couvert, l’application conserve la session afin de compléter les zones manquantes.
+La caméra choisie reste la même pendant tout le balayage. Le résultat est un assemblage géométrique en projection rectilinéaire, avec sélection des raccords, harmonisation et fusion multibande. Si les images ne se recouvrent pas assez ou si le cadrage demandé n’est pas couvert, l’application conserve la session afin de compléter les zones manquantes. Le zoom natif cadre les photos prises en une seule fois ; un recadrage local complète ce zoom uniquement si l’appareil ne peut pas atteindre le facteur demandé.
 
 ## Construire le projet
 
@@ -29,8 +29,8 @@ Les tests de planification et de couverture se lancent avec `xcodebuild test` su
 ## Choix techniques et limites
 
 - Les images source sélectionnées dans le flux sont conservées localement jusqu’à l’enregistrement du résultat ou l’abandon de la session. L’application ne transmet pas d’images à un serveur.
-- Le flux continu retient au plus 60 images utiles. Le champ vidéo réellement livré, y compris son ratio, sert à calculer la couverture ; il est souvent plus étroit qu’une photo 4:3. Un cadrage téléobjectif qui demanderait un balayage trop long n’est pas proposé.
-- L’assembleur ajuste sa résolution de sortie selon la mémoire de l’appareil, avec un plafond de 48 mégapixels. Les exports sont des HEIF SDR en Display P3 ; les données HDR étendues et ProRAW ne sont pas conservées.
+- Le flux continu retient au plus 60 images utiles, mais espace davantage les vues sélectionnées pour accélérer la prise de vue et l’assemblage. Le champ vidéo réellement livré, y compris son ratio, sert à calculer la couverture ; il est souvent plus étroit qu’une photo 4:3. Un cadrage téléobjectif qui demanderait un balayage trop long n’est pas proposé.
+- L’assembleur ajuste sa résolution de sortie selon la mémoire de l’appareil, avec un plafond de 16 mégapixels pour limiter le temps de calcul. Les assemblages sont des HEIF SDR en Display P3 ; les données HDR étendues et ProRAW ne sont pas conservées. Les photos directes utilisent le format HEIF natif lorsque l’iPhone le permet, avec JPEG en secours.
 - Les images d’entrée proviennent du flux vidéo : chacune peut être moins détaillée qu’une photo fixe haute résolution. La couverture du capteur principal et le recouvrement entre vues compensent partiellement cette limite dans l’image finale.
 - La scène doit présenter suffisamment de détails communs entre les vues. Un sujet en mouvement, une rotation autour d’un autre point que l’iPhone ou un premier plan très proche peut rendre l’assemblage difficile.
 

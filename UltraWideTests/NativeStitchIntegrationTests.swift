@@ -44,6 +44,7 @@ final class NativeStitchIntegrationTests: XCTestCase {
         }
 
         let result: StitchResult
+        let timeline = StitchTimeline()
         do {
             result = try await StitchingEngine().stitch(
                 inputs: inputs,
@@ -51,7 +52,8 @@ final class NativeStitchIntegrationTests: XCTestCase {
                 maximumMegapixels: 4,
                 targetAspectRatio: 3.0 / 4.0,
                 minimumHorizontalFOVDegrees: plan.targetHorizontalFOV,
-                minimumVerticalFOVDegrees: plan.targetVerticalFOV
+                minimumVerticalFOVDegrees: plan.targetVerticalFOV,
+                progress: { fraction in timeline.record(fraction) }
             )
         } catch {
             XCTFail("Native stitch failed: \(String(reflecting: error)); \(error.localizedDescription)")
@@ -71,6 +73,31 @@ final class NativeStitchIntegrationTests: XCTestCase {
         attachment.name = "Assembled portrait sweep"
         attachment.lifetime = .keepAlways
         add(attachment)
+        let timing = XCTAttachment(string: timeline.report())
+        timing.name = "Assembly stage timings"
+        timing.lifetime = .keepAlways
+        add(timing)
 #endif
+    }
+}
+
+private final class StitchTimeline: @unchecked Sendable {
+    private let lock = NSLock()
+    private let started = ProcessInfo.processInfo.systemUptime
+    private var milestones: [(Double, Double)] = []
+
+    func record(_ fraction: Double) {
+        lock.lock()
+        milestones.append((fraction, ProcessInfo.processInfo.systemUptime - started))
+        lock.unlock()
+    }
+
+    func report() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return [0.15, 0.35, 0.43, 0.46, 0.49, 0.50, 0.90, 0.94, 1.0].map { threshold in
+            let elapsed = milestones.first(where: { $0.0 >= threshold })?.1 ?? -1
+            return String(format: "%.2f: %.3f s", threshold, elapsed)
+        }.joined(separator: "\n")
     }
 }

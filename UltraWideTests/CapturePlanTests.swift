@@ -56,4 +56,26 @@ final class CapturePlanTests: XCTestCase {
         XCTAssertEqual(portrait.targetVerticalFOV, landscape.targetHorizontalFOV, accuracy: 0.001)
         XCTAssertEqual(portrait.expectedFrameCount, landscape.expectedFrameCount)
     }
+
+    func testIntermediateFieldAndSinglePhotoZoomFactors() throws {
+        let half = try XCTUnwrap(CapturePlan.make(
+            lens: .wide, target: .half, wideHorizontalFOV: 75, lensHorizontalFOV: 75
+        ))
+        let intermediate = try XCTUnwrap(CapturePlan.make(
+            lens: .wide, target: .threeQuarters, wideHorizontalFOV: 75,
+            lensHorizontalFOV: 75
+        ))
+        let normal = try XCTUnwrap(CapturePlan.make(
+            lens: .wide, target: .one, wideHorizontalFOV: 75, lensHorizontalFOV: 75
+        ))
+        XCTAssertGreaterThan(intermediate.targetHorizontalFOV, normal.targetHorizontalFOV)
+        XCTAssertLessThan(intermediate.targetHorizontalFOV, half.targetHorizontalFOV)
+        XCTAssertEqual(CaptureTarget.one.zoomFactor(wideHorizontalFOV: 75,
+                                                     lensHorizontalFOV: 75), 1, accuracy: 0.001)
+        XCTAssertEqual(CaptureTarget.onePointFive.zoomFactor(wideHorizontalFOV: 75,
+                                                              lensHorizontalFOV: 75), 1.5,
+                       accuracy: 0.001)
+        XCTAssertLessThan(CaptureTarget.one.zoomFactor(wideHorizontalFOV: 75,
+                                                        lensHorizontalFOV: 35), 1)
+    }
 }

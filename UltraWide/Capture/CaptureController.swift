@@ -91,8 +91,7 @@ final class CaptureController: ObservableObject {
     ) -> [CaptureTarget] {
         guard let wideFOV = CameraService.horizontalFieldOfView(for: .wide),
               let lensFOV = CameraService.horizontalFieldOfView(for: lens) else { return [] }
-        let candidates: [CaptureTarget] = lens == .wide ? [.half] : CaptureTarget.allCases
-        return candidates.filter {
+        return CaptureTarget.allCases.filter {
             CapturePlan.make(
                 lens: lens,
                 target: $0,
@@ -102,6 +101,32 @@ final class CaptureController: ObservableObject {
                 sourceLandscapeAspectRatio: 16.0 / 9.0
             ) != nil
         }
+    }
+
+    /// A 4:3 still from this physical lens already spans the requested field.
+    /// The video sweep is only needed when the target is wider than the lens.
+    var singlePhotoCropFactor: Double? {
+        guard let plan,
+              let wideFOV = CameraService.horizontalFieldOfView(for: .wide) else { return nil }
+        let lensFOV = plan.orientation.isPortrait
+            ? plan.sourceVerticalFOV : plan.sourceHorizontalFOV
+        let factor = plan.target.zoomFactor(wideHorizontalFOV: wideFOV,
+                                            lensHorizontalFOV: lensFOV)
+        return factor >= 0.995 ? max(1, factor) : nil
+    }
+
+    func captureSinglePhoto(to baseURL: URL) async throws -> SinglePhotoResult {
+        guard status == .ready, snapshot == nil, !captureRequested,
+              let factor = singlePhotoCropFactor else { throw CaptureError.notReady }
+        captureRequested = true
+        defer { captureRequested = false }
+        let result = try await camera.captureSinglePhoto(
+            to: baseURL, cropFactor: factor
+        )
+        camera.pause()
+        motion.stop()
+        status = .idle
+        return result
     }
 
     /// Starts live preview before the user's center tap. The plan uses the
@@ -128,7 +153,17 @@ final class CaptureController: ObservableObject {
         do {
             try await ensureCameraPermission()
             guard generation == lifecycleGeneration else { return }
-            try await camera.configure(lens: lens, orientation: orientation)
+            let wideFOV = CameraService.horizontalFieldOfView(for: .wide)
+            let lensFOV = CameraService.horizontalFieldOfView(for: lens)
+            let desiredZoom: Double
+            if let wideFOV, let lensFOV {
+                desiredZoom = max(1, target.zoomFactor(wideHorizontalFOV: wideFOV,
+                                                       lensHorizontalFOV: lensFOV))
+            } else {
+                desiredZoom = 1
+            }
+            try await camera.configure(lens: lens, orientation: orientation,
+                                       zoomFactor: desiredZoom)
             guard generation == lifecycleGeneration else { return }
             let aspect = try await camera.videoLandscapeAspectRatio()
             guard generation == lifecycleGeneration else { return }
@@ -142,7 +177,12 @@ final class CaptureController: ObservableObject {
                     lensHorizontalFOV: lensFOV,
                     sourceLandscapeAspectRatio: aspect
                   ) else { throw CaptureError.targetUnavailable }
-            try motion.start(orientation: orientation)
+            if target.zoomFactor(wideHorizontalFOV: wideFOV,
+                                 lensHorizontalFOV: lensFOV) < 0.995 {
+                try motion.start(orientation: orientation)
+            } else {
+                motion.stop()
+            }
             plan = newPlan
             tracker = CoverageTracker(plan: newPlan)
             coverage = tracker?.coverage(viewYaw: 0, viewPitch: 0)
@@ -551,9 +591,9 @@ final class CaptureController: ObservableObject {
         if coverage != displayed { coverage = displayed }
         guard status == .capturing, !captureRequested, !wrongOrientation,
               abs(reading.rollDegrees) < 6,
-              reading.angularSpeed < 0.45,
+              reading.angularSpeed < 0.7,
               completedCount < maximumFrames,
-              CACurrentMediaTime() - lastAttemptAt >= 0.22,
+              CACurrentMediaTime() - lastAttemptAt >= 0.12,
               tracker.shouldKeep(yaw: reading.yawDegrees,
                                  pitch: reading.pitchDegrees,
                                  repairMode: repairMode) else { return }

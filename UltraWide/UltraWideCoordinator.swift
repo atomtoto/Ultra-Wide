@@ -144,6 +144,10 @@ final class UltraWideCoordinator {
                 try await capture.resume()
             }
             if capture.status == .ready {
+                if capture.singlePhotoCropFactor != nil {
+                    await captureSinglePhoto()
+                    return
+                }
                 try await capture.beginSweep()
             }
             ui.issue = nil
@@ -153,6 +157,37 @@ final class UltraWideCoordinator {
         } catch {
             ui.isStarting = false
             if !(error is CancellationError) { showCaptureError(error, fatal: capture.status.isFailure) }
+            synchronize()
+        }
+    }
+
+    private func captureSinglePhoto() async {
+        ui.phase = .processing
+        ui.issue = nil
+        ui.processingProgress = nil
+        do {
+            let folder = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                   in: .userDomainMask)[0]
+                .appendingPathComponent("UltraWideResults", isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let baseURL = folder.appendingPathComponent(UUID().uuidString)
+            let result = try await capture.captureSinglePhoto(to: baseURL)
+            guard let preview = makeThumbnail(url: result.url, maxPixelSize: 1800) else {
+                throw CaptureError.photoDataUnavailable
+            }
+            if let previous = lastOutputURL { try? FileManager.default.removeItem(at: previous) }
+            lastOutputURL = result.url
+            ui.resultURL = result.url
+            ui.resultPreview = preview
+            ui.resultPixelSize = CGSize(width: result.pixelWidth, height: result.pixelHeight)
+            ui.saveState = .idle
+            ui.phase = .review
+            ui.isStarting = false
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        } catch {
+            ui.phase = .setup
+            ui.isStarting = false
+            showCaptureError(error, fatal: false)
             synchronize()
         }
     }
@@ -211,7 +246,7 @@ final class UltraWideCoordinator {
             let result = try await stitcher.stitch(
                 inputs: inputs,
                 outputURL: outputURL,
-                maximumMegapixels: 48,
+                maximumMegapixels: 16,
                 targetAspectRatio: snapshot.plan.orientation.isPortrait ? 3.0 / 4.0 : 4.0 / 3.0,
                 minimumHorizontalFOVDegrees: snapshot.plan.targetHorizontalFOV,
                 minimumVerticalFOVDegrees: snapshot.plan.targetVerticalFOV
@@ -364,6 +399,10 @@ final class UltraWideCoordinator {
         if !ui.availableTargets.contains(ui.selectedTarget) {
             ui.selectedTarget = ui.availableTargets.first ?? .half
         }
+        ui.isSinglePhoto = capture.currentSnapshot == nil
+            && capture.plan?.lens == lens
+            && capture.plan?.target.rawValue == ui.selectedTarget.rawValue
+            && capture.singlePhotoCropFactor != nil
     }
 
     private func showCaptureError(_ error: Error, fatal: Bool = true) {

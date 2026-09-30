@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreVideo
 import Foundation
 import ImageIO
 
@@ -6,10 +7,11 @@ import ImageIO
 final class CaptureSessionStore {
     private let rootURL: URL
     private let manager = FileManager.default
+    private let fileIO = CaptureFileIO()
 
-    init() {
+    init(rootURL: URL? = nil) {
         let support = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        rootURL = support.appendingPathComponent("UltraWideCapture", isDirectory: true)
+        self.rootURL = rootURL ?? support.appendingPathComponent("UltraWideCapture", isDirectory: true)
     }
 
     private var currentURL: URL { rootURL.appendingPathComponent("current", isDirectory: true) }
@@ -17,10 +19,13 @@ final class CaptureSessionStore {
 
     func create(_ snapshot: CaptureSessionSnapshot) throws {
         do {
-            if manager.fileExists(atPath: currentURL.path) {
-                try manager.removeItem(at: currentURL)
+            try fileIO.queue.sync {
+                if manager.fileExists(atPath: currentURL.path) {
+                    try manager.removeItem(at: currentURL)
+                }
+                try manager.createDirectory(at: currentURL, withIntermediateDirectories: true)
+                fileIO.sessionID = snapshot.sessionID
             }
-            try manager.createDirectory(at: currentURL, withIntermediateDirectories: true)
             try save(snapshot)
         } catch {
             throw CaptureError.diskWriteFailed
@@ -31,27 +36,60 @@ final class CaptureSessionStore {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
-            try encoder.encode(snapshot).write(to: metadataURL, options: .atomic)
+            let data = try encoder.encode(snapshot)
+            try fileIO.queue.sync {
+                guard fileIO.sessionID == snapshot.sessionID else { throw CaptureError.noSavedSession }
+                try data.write(to: metadataURL, options: .atomic)
+            }
         } catch {
             throw CaptureError.diskWriteFailed
         }
     }
 
-    func writePhoto(_ data: Data, id: UUID) throws -> URL {
+    func photoURL(id: UUID) -> URL {
+        currentURL.appendingPathComponent("\(id.uuidString).jpg")
+    }
+
+    func writePhoto(_ data: Data, id: UUID, sessionID: UUID) async throws -> URL {
         let isJPEG = data.count >= 2 && data[data.startIndex] == 0xFF
             && data[data.index(after: data.startIndex)] == 0xD8
         let url = currentURL.appendingPathComponent("\(id.uuidString).\(isJPEG ? "jpg" : "heic")")
-        do {
-            try data.write(to: url, options: .atomic)
-            return url
-        } catch {
-            throw CaptureError.diskWriteFailed
+        let fileIO = fileIO
+        return try await withCheckedThrowingContinuation { continuation in
+            fileIO.queue.async {
+                do {
+                    guard fileIO.sessionID == sessionID else { throw CaptureError.noSavedSession }
+                    try data.write(to: url, options: .atomic)
+                    continuation.resume(returning: url)
+                } catch {
+                    continuation.resume(throwing: CaptureError.diskWriteFailed)
+                }
+            }
+        }
+    }
+
+    func saveAsync(_ snapshot: CaptureSessionSnapshot) async throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(snapshot)
+        let url = metadataURL
+        let fileIO = fileIO
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            fileIO.queue.async {
+                do {
+                    guard fileIO.sessionID == snapshot.sessionID else { throw CaptureError.noSavedSession }
+                    try data.write(to: url, options: .atomic)
+                    continuation.resume()
+                } catch {
+                    continuation.resume(throwing: CaptureError.diskWriteFailed)
+                }
+            }
         }
     }
 
     func removePhoto(at url: URL) {
         guard url.deletingLastPathComponent().standardizedFileURL == currentURL.standardizedFileURL else { return }
-        try? manager.removeItem(at: url)
+        fileIO.queue.sync { try? manager.removeItem(at: url) }
     }
 
     func load() throws -> CaptureSessionSnapshot {
@@ -61,8 +99,9 @@ final class CaptureSessionStore {
         do {
             var snapshot = try JSONDecoder().decode(
                 CaptureSessionSnapshot.self,
-                from: Data(contentsOf: metadataURL)
+                from: fileIO.queue.sync { try Data(contentsOf: metadataURL) }
             )
+            fileIO.queue.sync { fileIO.sessionID = snapshot.sessionID }
             var needsPathUpdate = false
             for index in snapshot.slots.indices {
                 guard let frame = snapshot.slots[index].frame else { continue }
@@ -119,8 +158,17 @@ final class CaptureSessionStore {
     }
 
     func discard() {
-        try? manager.removeItem(at: currentURL)
+        fileIO.queue.sync {
+            fileIO.sessionID = nil
+            try? manager.removeItem(at: currentURL)
+        }
     }
+}
+
+private final class CaptureFileIO: @unchecked Sendable {
+    let queue = DispatchQueue(label: "com.ultrawide.capture.files", qos: .userInitiated)
+    // Accessed only on queue, including session replacement and discard.
+    var sessionID: UUID?
 }
 
 struct PhotoQualityResult: Sendable {
@@ -130,6 +178,49 @@ struct PhotoQualityResult: Sendable {
 }
 
 enum PhotoQualityAnalyzer {
+    /// Read a small luma grid directly from AVFoundation's buffer. There is
+    /// no GPU render, image allocation or JPEG decode on the selection path.
+    static func analyze(_ buffer: CVPixelBuffer) -> PhotoQualityResult {
+        let format = CVPixelBufferGetPixelFormatType(buffer)
+        let isLuma = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+            || format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        guard isLuma || format == kCVPixelFormatType_32BGRA,
+              CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else {
+            return PhotoQualityResult(sharpness: 0, brightness: 0, quality: .unknown)
+        }
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let sourceWidth = CVPixelBufferGetWidth(buffer)
+        let sourceHeight = CVPixelBufferGetHeight(buffer)
+        let scale = min(1, 192 / Double(max(sourceWidth, sourceHeight)))
+        let width = Int(Double(sourceWidth) * scale)
+        let height = Int(Double(sourceHeight) * scale)
+        let address = isLuma ? CVPixelBufferGetBaseAddressOfPlane(buffer, 0)
+            : CVPixelBufferGetBaseAddress(buffer)
+        guard width >= 5, height >= 5, let address else {
+            return PhotoQualityResult(sharpness: 0, brightness: 0, quality: .unknown)
+        }
+        let stride = isLuma ? CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+            : CVPixelBufferGetBytesPerRow(buffer)
+        let source = address.assumingMemoryBound(to: UInt8.self)
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {
+            let row = min(sourceHeight - 1, (2 * y + 1) * sourceHeight / (2 * height)) * stride
+            for x in 0..<width {
+                let column = min(sourceWidth - 1, (2 * x + 1) * sourceWidth / (2 * width))
+                if isLuma {
+                    let value = Int(source[row + column])
+                    pixels[y * width + x] = format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                        ? UInt8(clamping: (value - 16) * 255 / 219) : UInt8(value)
+                } else {
+                    let index = row + column * 4
+                    pixels[y * width + x] = UInt8((29 * Int(source[index])
+                        + 150 * Int(source[index + 1]) + 77 * Int(source[index + 2])) >> 8)
+                }
+            }
+        }
+        return analyze(pixels, width: width, height: height)
+    }
+
     static func analyze(_ data: Data) -> PhotoQualityResult {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
@@ -167,6 +258,10 @@ enum PhotoQualityAnalyzer {
             return PhotoQualityResult(sharpness: 0, brightness: 0, quality: .unknown)
         }
 
+        return analyze(pixels, width: width, height: height)
+    }
+
+    private static func analyze(_ pixels: [UInt8], width: Int, height: Int) -> PhotoQualityResult {
         let count = Double(width * height)
         let brightness = pixels.reduce(0.0) { $0 + Double($1) } / count
         let contrast = pixels.reduce(0.0) {

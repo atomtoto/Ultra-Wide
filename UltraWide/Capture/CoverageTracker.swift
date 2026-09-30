@@ -111,11 +111,15 @@ struct CoverageTracker {
         let distinct = imageRects.allSatisfy { previous in
             let dx = abs(candidate.midX - previous.midX) / max(candidate.width, previous.width)
             let dy = abs(candidate.midY - previous.midY) / max(candidate.height, previous.height)
-            return hypot(dx, dy) >= (repairMode ? 0.11 : filled > 0.90 ? 0.12 : 0.33)
+            return hypot(dx, dy) >= (repairMode ? 0.08 : filled > 0.90 ? 0.06 : 0.12)
         }
-        guard distinct else { return false }
+        if !distinct {
+            // Capture small edge gains as soon as they appear, including
+            // when several corners still need a slight adjustment.
+            return !repairMode && filled > 0.90 && fraction(adding: candidate) - filled >= 0.0001
+        }
         if repairMode { return true }
-        return fraction(adding: candidate) - filled >= (filled > 0.90 ? 0.0001 : 0.012)
+        return fraction(adding: candidate) - filled >= (filled > 0.90 ? 0.0001 : 0.005)
     }
 
     mutating func include(yaw: Double, pitch: Double) {

@@ -6,11 +6,13 @@ import QuartzCore
 
 /// Keeps the physical wide or tele camera running and exposes selected frames
 /// from its video stream. Encoding happens off the capture callback queue.
-final class CameraService: @unchecked Sendable {
-    let session = AVCaptureSession()
+final class CameraService: CameraCapturing, @unchecked Sendable {
+    // Mutated on sessionQueue; the main actor only attaches its preview.
+    nonisolated(unsafe) let session = AVCaptureSession()
 
     private let sessionQueue = DispatchQueue(label: "com.ultrawide.camera.session", qos: .userInitiated)
     private let videoQueue = DispatchQueue(label: "com.ultrawide.camera.video", qos: .userInitiated)
+    private let selectionQueue = DispatchQueue(label: "com.ultrawide.camera.selection", qos: .userInitiated)
     private let encodingQueue = DispatchQueue(label: "com.ultrawide.camera.encoding", qos: .userInitiated)
     private let output = AVCaptureVideoDataOutput()
     private let photoOutput = AVCapturePhotoOutput()
@@ -30,6 +32,20 @@ final class CameraService: @unchecked Sendable {
 
     static var availableLenses: [CaptureLens] {
         CaptureLens.allCases.filter { device(for: $0) != nil }
+    }
+
+    var supportedLenses: [CaptureLens] { Self.availableLenses }
+    func fieldOfView(for lens: CaptureLens) -> Double? { Self.horizontalFieldOfView(for: lens) }
+
+    func ensurePermission() async throws {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized: return
+        case .notDetermined:
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                throw CaptureError.cameraPermissionDenied
+            }
+        default: throw CaptureError.cameraPermissionDenied
+        }
     }
 
     static func horizontalFieldOfView(for lens: CaptureLens) -> Double? {
@@ -125,6 +141,7 @@ final class CameraService: @unchecked Sendable {
 
         session.startRunning()
         guard session.isRunning else { throw CaptureError.cameraUnavailable }
+        frameCache.setClock(session.synchronizationClock)
         activeDevice = device
     }
 
@@ -199,7 +216,7 @@ final class CameraService: @unchecked Sendable {
                         device.activeMaxExposureDuration = CMTimeMaximum(
                             device.activeFormat.minExposureDuration,
                             CMTimeMinimum(device.activeFormat.maxExposureDuration,
-                                          CMTime(value: 1, timescale: 120))
+                                          CMTime(value: 1, timescale: 240))
                         )
                     }
                     device.unlockForConfiguration()
@@ -219,42 +236,56 @@ final class CameraService: @unchecked Sendable {
         return data
     }
 
-    /// Assess a small uncompressed preview off the main actor. Rejected
-    /// samples never incur full-resolution rendering or JPEG encoding.
-    func captureVideoSample(
-        near motionTimestamp: TimeInterval,
-        allowSoftFrame: Bool = false,
-        allowLowQuality: Bool = false
-    ) async throws -> VideoCaptureSample {
+    /// Select and assess a retained buffer independently of the JPEG writer.
+    func selectVideoFrame(near motionTimestamp: TimeInterval) async throws -> SelectedVideoFrame {
         guard let frame = frameCache.latest(near: motionTimestamp, maxAge: 0.20) else {
             throw CaptureError.photoDataUnavailable
         }
-        return try await encodeVideoSample(frame.pixelBuffer, allowSoftFrame: allowSoftFrame,
-                                           allowLowQuality: allowLowQuality)
+        return await assess(frame)
+    }
+
+    private func assess(_ frame: VideoFrame) async -> SelectedVideoFrame {
+        await withCheckedContinuation { continuation in
+            selectionQueue.async {
+                let quality = PhotoQualityAnalyzer.analyze(frame.pixelBuffer)
+                continuation.resume(returning: SelectedVideoFrame(
+                    pixelBuffer: frame.pixelBuffer, quality: quality, timestamp: frame.timestamp
+                ))
+            }
+        }
+    }
+
+    /// Compatibility helper for callers that need the encoded image itself.
+    func captureVideoSample(
+        near motionTimestamp: TimeInterval,
+        allowLowQuality: Bool = false
+    ) async throws -> VideoCaptureSample {
+        let selected = try await selectVideoFrame(near: motionTimestamp)
+        return try await encodeIfUseful(selected, allowLowQuality: allowLowQuality)
     }
 
     func encodeVideoSample(
         _ pixelBuffer: CVPixelBuffer,
-        allowSoftFrame: Bool = false,
         allowLowQuality: Bool = false
     ) async throws -> VideoCaptureSample {
-        let frame = VideoFrame(pixelBuffer: pixelBuffer)
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VideoCaptureSample, Error>) in
+        let selected = await assess(VideoFrame(pixelBuffer: pixelBuffer, timestamp: 0))
+        return try await encodeIfUseful(selected, allowLowQuality: allowLowQuality)
+    }
+
+    private func encodeIfUseful(
+        _ selected: SelectedVideoFrame,
+        allowLowQuality: Bool
+    ) async throws -> VideoCaptureSample {
+        guard allowLowQuality || SweepCapturePolicy.shouldEncode(selected.quality)
+        else { return VideoCaptureSample(data: nil, quality: selected.quality) }
+        let data = try await encodeSelectedFrame(selected)
+        return VideoCaptureSample(data: data, quality: selected.quality)
+    }
+
+    func encodeSelectedFrame(_ selected: SelectedVideoFrame) async throws -> Data {
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
             encodingQueue.async { [self] in
-                let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
-                let scale = min(1, 192 / max(image.extent.width, image.extent.height))
-                let thumbnail = image.applyingFilter("CILanczosScaleTransform", parameters: [
-                    kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1
-                ])
-                let quality = imageContext.createCGImage(thumbnail, from: thumbnail.extent)
-                    .map { PhotoQualityAnalyzer.analyze($0) }
-                    ?? PhotoQualityResult(sharpness: 0, brightness: 0, quality: .unknown)
-                guard allowLowQuality || SweepCapturePolicy.shouldEncode(
-                    quality, allowSoftFrame: allowSoftFrame
-                ) else {
-                    continuation.resume(returning: VideoCaptureSample(data: nil, quality: quality))
-                    return
-                }
+                let image = CIImage(cvPixelBuffer: selected.pixelBuffer)
                 guard let cgImage = imageContext.createCGImage(image, from: image.extent),
                       let destinationData = CFDataCreateMutable(nil, 0),
                       let destination = CGImageDestinationCreateWithData(
@@ -270,9 +301,7 @@ final class CameraService: @unchecked Sendable {
                     continuation.resume(throwing: CaptureError.photoDataUnavailable)
                     return
                 }
-                continuation.resume(returning: VideoCaptureSample(
-                    data: destinationData as Data, quality: quality
-                ))
+                continuation.resume(returning: destinationData as Data)
             }
         }
     }
@@ -391,6 +420,14 @@ struct VideoCaptureSample: Sendable {
     let quality: PhotoQualityResult
 }
 
+/// AVFoundation buffers are retained and read only by the selection and
+/// encoding queues. At most three selected buffers wait for the writer.
+struct SelectedVideoFrame: @unchecked Sendable {
+    let pixelBuffer: CVPixelBuffer
+    let quality: PhotoQualityResult
+    let timestamp: TimeInterval
+}
+
 struct SinglePhotoResult: Sendable {
     let url: URL
     let pixelWidth: Int
@@ -432,12 +469,21 @@ extension CaptureOrientation {
 
 private struct VideoFrame: @unchecked Sendable {
     let pixelBuffer: CVPixelBuffer
+    let timestamp: TimeInterval
 }
 
 private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var buffer: CVPixelBuffer?
     private var receivedAt: TimeInterval = 0
+    private var presentationTimestamp: TimeInterval = 0
+    private var clock: CMClock?
+
+    func setClock(_ clock: CMClock?) {
+        lock.lock()
+        self.clock = clock
+        lock.unlock()
+    }
 
     func captureOutput(
         _ output: AVCaptureOutput,
@@ -448,6 +494,12 @@ private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBuf
         lock.lock()
         buffer = pixelBuffer
         receivedAt = CACurrentMediaTime()
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let hostTime = clock.map {
+            CMSyncConvertTime(presentationTime, from: $0, to: CMClockGetHostTimeClock()).seconds
+        } ?? receivedAt
+        presentationTimestamp = hostTime.isFinite && abs(hostTime - receivedAt) < 0.5
+            ? hostTime : receivedAt
         lock.unlock()
     }
 
@@ -463,14 +515,16 @@ private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBuf
         defer { lock.unlock() }
         let age = CACurrentMediaTime() - receivedAt
         guard age >= 0, age <= maxAge,
-              abs(receivedAt - timestamp) <= maxAge else { return nil }
-        return buffer.map { VideoFrame(pixelBuffer: $0) }
+              abs(presentationTimestamp - timestamp) <= maxAge else { return nil }
+        return buffer.map { VideoFrame(pixelBuffer: $0, timestamp: presentationTimestamp) }
     }
 
     func clear() {
         lock.lock()
         buffer = nil
         receivedAt = 0
+        presentationTimestamp = 0
+        clock = nil
         lock.unlock()
     }
 }

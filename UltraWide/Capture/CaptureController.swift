@@ -15,13 +15,14 @@ final class CaptureController: ObservableObject {
     @Published private(set) var coverage: CaptureCoverage?
     @Published private(set) var orientationNeedsCorrection = false
     @Published private(set) var isCenterAnchoring = false
+    @Published private(set) var isFinishingSweep = false
     @Published private(set) var currentPass = 1
 
     let maximumFrames = 60
     let maximumRetakes = 60
-    private let camera = CameraService()
-    private let motion = MotionGuide()
-    private let store = CaptureSessionStore()
+    private let camera: any CameraCapturing
+    private let motion: any CaptureMotionProviding
+    private let store: CaptureSessionStore
     private var snapshot: CaptureSessionSnapshot?
     private var tracker: CoverageTracker?
     private var latestReading: MotionReading?
@@ -29,7 +30,9 @@ final class CaptureController: ObservableObject {
     private var lifecycleGeneration = 0
     private var lastAttemptAt: TimeInterval = 0
     private var consecutiveMissingFrames = 0
-    private var sweepCapturePolicy = SweepCapturePolicy()
+    private let frameQueue = SweepFrameQueue()
+    private var automaticFinishRequested = false
+    private var finishInProgress = false
     private var repairMode = false
     private var repairFrameCount = 0
     private var repairEdgeFrameCount = 0
@@ -38,7 +41,7 @@ final class CaptureController: ObservableObject {
     private var observers: [NSObjectProtocol] = []
 
     var previewSession: AVCaptureSession { camera.session }
-    var availableLenses: [CaptureLens] { CameraService.availableLenses }
+    var availableLenses: [CaptureLens] { camera.supportedLenses }
     var currentSnapshot: CaptureSessionSnapshot? { snapshot }
     var hasRecoverableSession: Bool {
         snapshot != nil && (status == .paused || status.isFailure)
@@ -53,12 +56,18 @@ final class CaptureController: ObservableObject {
         }
     }
     var remainingRetakes: Int { max(0, maximumFrames - completedCount) }
-    var completedCount: Int { snapshot?.frames.count ?? 0 }
+    var completedCount: Int { (snapshot?.frames.count ?? 0) + frameQueue.count }
     var currentSlot: CaptureSlot? { nil }
 
-    init() {
-        motion.onReading = { [weak self] reading in self?.updateReading(reading) }
-        if let saved = try? store.load() {
+    init(camera: (any CameraCapturing)? = nil,
+         motion: (any CaptureMotionProviding)? = nil,
+         store: CaptureSessionStore? = nil) {
+        self.camera = camera ?? CameraService()
+        self.motion = motion ?? MotionGuide()
+        self.store = store ?? CaptureSessionStore()
+        self.motion.onReading = { [weak self] reading in self?.updateReading(reading) }
+        frameQueue.onCompletion = { [weak self] in self?.selectedFrameFinished() }
+        if let saved = try? self.store.load() {
             snapshot = saved
             tracker = CoverageTracker(plan: saved.plan, frames: saved.frames)
             repairMode = saved.currentPass > 1
@@ -68,14 +77,14 @@ final class CaptureController: ObservableObject {
         }
         let interruption = NotificationCenter.default.addObserver(
             forName: AVCaptureSession.wasInterruptedNotification,
-            object: camera.session,
+            object: self.camera.session,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in self?.pause() }
         }
         let runtimeError = NotificationCenter.default.addObserver(
             forName: AVCaptureSession.runtimeErrorNotification,
-            object: camera.session,
+            object: self.camera.session,
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
@@ -90,8 +99,8 @@ final class CaptureController: ObservableObject {
         for lens: CaptureLens,
         orientation: CaptureOrientation = .portrait
     ) -> [CaptureTarget] {
-        guard let wideFOV = CameraService.horizontalFieldOfView(for: .wide),
-              let lensFOV = CameraService.horizontalFieldOfView(for: lens) else { return [] }
+        guard let wideFOV = camera.fieldOfView(for: .wide),
+              let lensFOV = camera.fieldOfView(for: lens) else { return [] }
         return CaptureTarget.allCases.filter {
             CapturePlan.make(
                 lens: lens,
@@ -108,7 +117,7 @@ final class CaptureController: ObservableObject {
     /// The video sweep is only needed when the target is wider than the lens.
     var singlePhotoCropFactor: Double? {
         guard let plan,
-              let wideFOV = CameraService.horizontalFieldOfView(for: .wide) else { return nil }
+              let wideFOV = camera.fieldOfView(for: .wide) else { return nil }
         let lensFOV = plan.orientation.isPortrait
             ? plan.sourceVerticalFOV : plan.sourceHorizontalFOV
         let factor = plan.target.zoomFactor(wideHorizontalFOV: wideFOV,
@@ -154,8 +163,8 @@ final class CaptureController: ObservableObject {
         do {
             try await ensureCameraPermission()
             guard generation == lifecycleGeneration else { return }
-            let wideFOV = CameraService.horizontalFieldOfView(for: .wide)
-            let lensFOV = CameraService.horizontalFieldOfView(for: lens)
+            let wideFOV = camera.fieldOfView(for: .wide)
+            let lensFOV = camera.fieldOfView(for: lens)
             let desiredZoom: Double
             if let wideFOV, let lensFOV {
                 desiredZoom = max(1, target.zoomFactor(wideHorizontalFOV: wideFOV,
@@ -168,8 +177,8 @@ final class CaptureController: ObservableObject {
             guard generation == lifecycleGeneration else { return }
             let aspect = try await camera.videoLandscapeAspectRatio()
             guard generation == lifecycleGeneration else { return }
-            guard let wideFOV = CameraService.horizontalFieldOfView(for: .wide),
-                  let lensFOV = CameraService.horizontalFieldOfView(for: lens),
+            guard let wideFOV = camera.fieldOfView(for: .wide),
+                  let lensFOV = camera.fieldOfView(for: lens),
                   let newPlan = CapturePlan.make(
                     lens: lens,
                     target: target,
@@ -180,7 +189,7 @@ final class CaptureController: ObservableObject {
                   ) else { throw CaptureError.targetUnavailable }
             if target.zoomFactor(wideHorizontalFOV: wideFOV,
                                  lensHorizontalFOV: lensFOV) < 0.995 {
-                try motion.start(orientation: orientation)
+                try motion.start(orientation: orientation, resetReference: true)
             } else {
                 motion.stop()
             }
@@ -216,7 +225,8 @@ final class CaptureController: ObservableObject {
         guard let reading = latestReading, readingIsFresh(reading) else {
             throw CaptureError.notReady
         }
-        guard reading.orientationMatchesConfiguration, abs(reading.rollDegrees) < 8 else {
+        guard reading.orientationMatchesConfiguration,
+              abs(reading.rollDegrees) < SweepCapturePolicy.maximumRollDegrees else {
             throw CaptureError.orientationChanged
         }
         isCenterAnchoring = true
@@ -233,7 +243,7 @@ final class CaptureController: ObservableObject {
             throw CaptureError.notReady
         }
         guard centerReading.orientationMatchesConfiguration,
-              abs(centerReading.rollDegrees) < 8 else {
+              abs(centerReading.rollDegrees) < SweepCapturePolicy.maximumRollDegrees else {
             throw CaptureError.orientationChanged
         }
 
@@ -264,41 +274,64 @@ final class CaptureController: ObservableObject {
         }
         lastAttemptAt = 0
         consecutiveMissingFrames = 0
-        sweepCapturePolicy.reset()
+        automaticFinishRequested = false
+        isFinishingSweep = false
         coverage = tracker?.coverage(viewYaw: 0, viewPitch: 0)
         status = .capturing
+        // Selection and encoding use separate queues. Configure the short
+        // sweep exposure while the already delivered center buffer is saved.
+        Task { [weak self] in
+            guard let self, self.lifecycleGeneration == generation,
+                  self.status == .capturing else { return }
+            try? await self.camera.prepareForSweep()
+        }
         // Select the video buffer while the phone still points at the center.
         // Encoding and saving may finish after the user begins moving.
         captureRequested = true
         lastAttemptAt = CACurrentMediaTime()
         _ = await captureCandidate(centerReading, allowLowQuality: completedCount == 0)
         guard generation == lifecycleGeneration, status == .capturing else { return }
-        // This is a quick device lock and is intentionally outside the path
-        // that determines the center image.
-        Task { [weak self] in
-            guard let self, self.lifecycleGeneration == generation,
-                  self.status == .capturing else { return }
-            try? await self.camera.prepareForSweep()
-        }
     }
 
     /// Ends the sweep manually. The full target might still be incomplete;
     /// the user can continue from the review without losing selected frames.
     @discardableResult
-    func stopSweep() throws -> CaptureSessionSnapshot {
-        guard var saved = snapshot, saved.frames.count >= 2,
+    func stopSweep() async throws -> CaptureSessionSnapshot {
+        guard snapshot != nil, completedCount >= 2, !finishInProgress,
               status == .capturing || status == .ready else {
             throw CaptureError.incompletePass
+        }
+        finishInProgress = true
+        let generation = lifecycleGeneration
+        defer {
+            if generation == lifecycleGeneration {
+                finishInProgress = false
+                isFinishingSweep = false
+            }
+        }
+        isFinishingSweep = true
+        camera.pause()
+        motion.suspendSampling()
+        // The selected buffers already cover the field. Flush their files
+        // before exposing a snapshot to the assembler.
+        await frameQueue.drain()
+        guard generation == lifecycleGeneration,
+              status == .capturing || status == .ready,
+              var saved = snapshot, saved.frames.count >= 2 else {
+            throw CaptureError.notReady
         }
         saved.isPassOpen = false
         saved.coverageFraction = tracker?.fraction ?? saved.coverageFraction
         saved.updatedAt = Date()
-        try store.save(saved)
+        try await store.saveAsync(saved)
+        guard generation == lifecycleGeneration else { throw CaptureError.notReady }
         snapshot = saved
         lifecycleGeneration += 1
         captureRequested = false
-        camera.pause()
-        motion.suspendSampling()
+        finishInProgress = false
+        isFinishingSweep = false
+        isCenterAnchoring = false
+        automaticFinishRequested = false
         status = .reviewing
         return saved
     }
@@ -317,7 +350,7 @@ final class CaptureController: ObservableObject {
         do {
             try await ensureCameraPermission()
             guard generation == lifecycleGeneration else { return }
-            try await camera.configure(lens: saved.plan.lens, orientation: saved.plan.orientation)
+            try await camera.configure(lens: saved.plan.lens, orientation: saved.plan.orientation, zoomFactor: 1)
             guard generation == lifecycleGeneration else { return }
             let needsCalibration = !motion.isActive || !motion.hasReference
             if needsCalibration {
@@ -354,7 +387,7 @@ final class CaptureController: ObservableObject {
 
     // Compatibility entry points during migration of the coordinator.
     @discardableResult
-    func finishPass() throws -> CaptureSessionSnapshot { try stopSweep() }
+    func finishPass() async throws -> CaptureSessionSnapshot { try await stopSweep() }
 
     func beginRefinementPass() async throws { try await resumeSweep() }
 
@@ -371,7 +404,8 @@ final class CaptureController: ObservableObject {
 
     @discardableResult
     func captureCurrentView() async throws -> CapturedFrame {
-        guard status == .capturing, !captureRequested, completedCount < maximumFrames,
+        guard status == .capturing, !captureRequested, !isFinishingSweep, !frameQueue.isFull,
+              completedCount < maximumFrames,
               let reading = latestReading, readingIsFresh(reading) else {
             throw CaptureError.notReady
         }
@@ -400,6 +434,7 @@ final class CaptureController: ObservableObject {
 
     func pause() {
         lifecycleGeneration += 1
+        cancelPendingCaptures()
         motion.stop()
         camera.pause()
         latestReading = nil
@@ -430,11 +465,11 @@ final class CaptureController: ObservableObject {
                     status = .reviewing
                     return
                 }
-                try await camera.configure(lens: saved.plan.lens, orientation: saved.plan.orientation)
+                try await camera.configure(lens: saved.plan.lens, orientation: saved.plan.orientation, zoomFactor: 1)
                 guard generation == lifecycleGeneration else { return }
                 referenceYawOffset = 0
                 referencePitchOffset = 0
-                try motion.start(orientation: saved.plan.orientation)
+                try motion.start(orientation: saved.plan.orientation, resetReference: true)
                 tracker = CoverageTracker(plan: saved.plan, frames: saved.frames)
                 repairMode = saved.currentPass > 1
                 repairFrameCount = 0
@@ -470,7 +505,7 @@ final class CaptureController: ObservableObject {
         let previousPitchOffset = referencePitchOffset
         referenceYawOffset = referenceFrame.yawDegrees
         referencePitchOffset = referenceFrame.pitchDegrees
-        do { try motion.recenter() }
+        do { _ = try motion.recenter() }
         catch {
             referenceYawOffset = previousYawOffset
             referencePitchOffset = previousPitchOffset
@@ -481,6 +516,10 @@ final class CaptureController: ObservableObject {
 
     func discard() {
         lifecycleGeneration += 1
+        frameQueue.cancel()
+        automaticFinishRequested = false
+        finishInProgress = false
+        isFinishingSweep = false
         motion.stop()
         camera.pause()
         store.discard()
@@ -571,8 +610,8 @@ final class CaptureController: ObservableObject {
         return visited.count == rects.count
     }
 
-    private func updateReading(_ raw: MotionReading) {
-        let reading = MotionReading(
+    private func adjusted(_ raw: MotionReading) -> MotionReading {
+        MotionReading(
             yawDegrees: raw.yawDegrees + referenceYawOffset,
             pitchDegrees: raw.pitchDegrees + referencePitchOffset,
             rollDegrees: raw.rollDegrees,
@@ -580,9 +619,13 @@ final class CaptureController: ObservableObject {
             orientationMatchesConfiguration: raw.orientationMatchesConfiguration,
             sampleTimestamp: raw.sampleTimestamp
         )
+    }
+
+    private func updateReading(_ raw: MotionReading) {
+        let reading = adjusted(raw)
         latestReading = reading
         let wrongOrientation = !reading.orientationMatchesConfiguration
-            || abs(reading.rollDegrees) >= 8
+            || abs(reading.rollDegrees) >= SweepCapturePolicy.maximumRollDegrees
         if orientationNeedsCorrection != wrongOrientation {
             orientationNeedsCorrection = wrongOrientation
         }
@@ -591,9 +634,9 @@ final class CaptureController: ObservableObject {
             ? tracker.coverage(viewYaw: reading.yawDegrees, viewPitch: reading.pitchDegrees)
             : tracker.coverage(viewYaw: 0, viewPitch: 0)
         if coverage != displayed { coverage = displayed }
-        guard status == .capturing, !captureRequested, !wrongOrientation,
-              abs(reading.rollDegrees) < 6,
-              reading.angularSpeed < SweepCapturePolicy.maximumAngularSpeed,
+        guard status == .capturing, !captureRequested, !isFinishingSweep,
+              !frameQueue.isFull, !wrongOrientation,
+              SweepCapturePolicy.allows(reading),
               completedCount < maximumFrames,
               CACurrentMediaTime() - lastAttemptAt >= SweepCapturePolicy.minimumFrameInterval,
               tracker.shouldKeep(yaw: reading.yawDegrees,
@@ -610,88 +653,88 @@ final class CaptureController: ObservableObject {
         _ reading: MotionReading,
         allowLowQuality: Bool = false
     ) async -> CapturedFrame? {
+        guard let task = await reserveCandidate(reading, allowLowQuality: allowLowQuality) else { return nil }
+        return await task.value
+    }
+
+    /// Only the small luma analysis holds the selection latch. JPEG encoding
+    /// and disk writes cannot delay the next motion sample.
+    private func reserveCandidate(
+        _ reading: MotionReading,
+        allowLowQuality: Bool
+    ) async -> Task<CapturedFrame?, Never>? {
         let generation = lifecycleGeneration
         defer {
             if generation == lifecycleGeneration { captureRequested = false }
         }
-        guard status == .capturing, var saved = snapshot,
-              let tracker, readingIsFresh(reading),
+        guard status == .capturing, !isFinishingSweep, !frameQueue.isFull, let saved = snapshot,
+              tracker != nil, readingIsFresh(reading),
               reading.orientationMatchesConfiguration,
-              abs(reading.rollDegrees) < 8,
-              saved.frames.count < maximumFrames else { return nil }
+              abs(reading.rollDegrees) < SweepCapturePolicy.maximumRollDegrees,
+              completedCount < maximumFrames else { return nil }
         do {
-            let sample = try await camera.captureVideoSample(
-                near: reading.sampleTimestamp,
-                allowSoftFrame: sweepCapturePolicy.allowsSoftFrame(
-                    at: CACurrentMediaTime(), angularSpeed: reading.angularSpeed
-                ),
-                allowLowQuality: allowLowQuality
-            )
-            guard generation == lifecycleGeneration, status == .capturing,
+            let selected = try await camera.selectVideoFrame(near: reading.sampleTimestamp)
+            guard generation == lifecycleGeneration, status == .capturing, !isFinishingSweep,
                   snapshot?.sessionID == saved.sessionID,
-                  snapshot?.slots.count == saved.slots.count,
-                  saved.frames.count < maximumFrames else { return nil }
+                  !frameQueue.isFull, completedCount < maximumFrames else { return nil }
             consecutiveMissingFrames = 0
-            let quality = sample.quality
-            guard let data = sample.data else {
-                sweepCapturePolicy.rejected(quality, at: CACurrentMediaTime())
-                return nil
-            }
-            guard tracker.shouldKeep(yaw: reading.yawDegrees,
-                                     pitch: reading.pitchDegrees,
+            // The tap fixes the first frame at the center. Subsequent frames
+            // use the pose at exposure, including during continuous movement.
+            let pose: MotionReading
+            if allowLowQuality && saved.frames.isEmpty && frameQueue.count == 0 {
+                pose = reading
+            } else if let sampled = motion.reading(near: selected.timestamp) {
+                pose = adjusted(sampled)
+            } else { return nil }
+            guard pose.orientationMatchesConfiguration,
+                  abs(pose.rollDegrees) < SweepCapturePolicy.maximumRollDegrees,
+                  allowLowQuality || SweepCapturePolicy.allows(pose) else { return nil }
+            let quality = selected.quality
+            guard allowLowQuality || SweepCapturePolicy.shouldEncode(quality) else { return nil }
+            // The live tracker includes buffers still waiting for the writer.
+            guard let tracker = self.tracker,
+                  tracker.shouldKeep(yaw: pose.yawDegrees,
+                                     pitch: pose.pitchDegrees,
                                      repairMode: repairMode) else { return nil }
             let id = UUID()
-            let url = try store.writePhoto(data, id: id)
             let frame = CapturedFrame(
                 id: id,
                 slotID: id.uuidString,
-                fileURL: url,
+                fileURL: store.photoURL(id: id),
                 pass: saved.currentPass,
                 capturedAt: Date(),
-                yawDegrees: reading.yawDegrees,
-                pitchDegrees: reading.pitchDegrees,
-                rollDegrees: reading.rollDegrees,
+                yawDegrees: pose.yawDegrees,
+                pitchDegrees: pose.pitchDegrees,
+                rollDegrees: pose.rollDegrees,
                 sharpnessScore: quality.sharpness,
                 meanBrightness: quality.brightness,
                 quality: quality.quality
             )
-            let position = tracker.footprint(yaw: reading.yawDegrees,
-                                             pitch: reading.pitchDegrees)
-            let column = max(0, min(saved.plan.columns - 1,
-                Int(position.midX * Double(saved.plan.columns))))
-            let row = max(0, min(saved.plan.rows - 1,
-                Int(position.midY * Double(saved.plan.rows))))
-            saved.slots.append(CaptureSlot(
-                id: frame.slotID, row: row, column: column,
-                yawDegrees: frame.yawDegrees, pitchDegrees: frame.pitchDegrees,
-                frame: frame
-            ))
-            let newTracker = CoverageTracker(plan: saved.plan, frames: saved.frames)
-            saved.coverageFraction = newTracker.fraction
-            saved.updatedAt = Date()
-            do { try store.save(saved) }
-            catch {
-                store.removePhoto(at: url)
-                throw error
-            }
-            snapshot = saved
+            guard let task = frameQueue.enqueue(frame, write: { [weak self] in
+                await self?.persistCandidate(frame, selected: selected,
+                                             sessionID: saved.sessionID, generation: generation)
+            }) else { return nil }
+            var newTracker = tracker
+            newTracker.include(yaw: frame.yawDegrees, pitch: frame.pitchDegrees)
             self.tracker = newTracker
-            sweepCapturePolicy.reset()
-            publish(saved)
-            coverage = newTracker.coverage(viewYaw: latestReading?.yawDegrees ?? reading.yawDegrees,
-                                           viewPitch: latestReading?.pitchDegrees ?? reading.pitchDegrees)
+            coverage = newTracker.coverage(viewYaw: latestReading?.yawDegrees ?? pose.yawDegrees,
+                                           viewPitch: latestReading?.pitchDegrees ?? pose.pitchDegrees)
             if repairMode {
                 repairFrameCount += 1
+                let position = tracker.footprint(yaw: frame.yawDegrees, pitch: frame.pitchDegrees)
                 if position.midX < 0.35 || position.midX > 0.65
                     || position.midY < 0.35 || position.midY > 0.65 {
                     repairEdgeFrameCount += 1
                 }
             }
-            if saved.frames.count >= maximumFrames || (newTracker.isComplete
+            if completedCount >= maximumFrames || (newTracker.isComplete
                 && (!repairMode || (repairFrameCount >= 4 && repairEdgeFrameCount >= 3))) {
-                _ = try stopSweep()
+                automaticFinishRequested = true
+                isFinishingSweep = true
+                camera.pause()
+                motion.suspendSampling()
             }
-            return frame
+            return task
         } catch {
             guard generation == lifecycleGeneration else { return nil }
             // A single missing video sample is normal while moving. Persistent
@@ -699,15 +742,114 @@ final class CaptureController: ObservableObject {
             if case CaptureError.photoDataUnavailable = error {
                 consecutiveMissingFrames += 1
                 if consecutiveMissingFrames < 10 { return nil }
+                pause()
                 status = .failed(CaptureError.cameraUnavailable.localizedDescription)
-                motion.stop()
-                camera.pause()
                 return nil
             }
+            pause()
             status = .failed(error.localizedDescription)
-            motion.stop()
-            camera.pause()
             return nil
+        }
+    }
+
+    private func persistCandidate(
+        _ frame: CapturedFrame,
+        selected: SelectedVideoFrame,
+        sessionID: UUID,
+        generation: Int
+    ) async -> CapturedFrame? {
+        func isCurrent() -> Bool {
+            generation == lifecycleGeneration && snapshot?.sessionID == sessionID
+                && status == .capturing && !Task.isCancelled
+        }
+        guard isCurrent() else { return nil }
+        do {
+            let data = try await camera.encodeSelectedFrame(selected)
+            guard isCurrent() else { return nil }
+            let url = try await store.writePhoto(data, id: frame.id, sessionID: sessionID)
+            guard isCurrent(), var saved = snapshot else {
+                store.removePhoto(at: url)
+                return nil
+            }
+            let position = CoverageTracker(plan: saved.plan).footprint(
+                yaw: frame.yawDegrees, pitch: frame.pitchDegrees
+            )
+            let column = max(0, min(saved.plan.columns - 1,
+                Int(position.midX * Double(saved.plan.columns))))
+            let row = max(0, min(saved.plan.rows - 1,
+                Int(position.midY * Double(saved.plan.rows))))
+            saved.slots.append(CaptureSlot(
+                id: frame.slotID, row: row, column: column,
+                yawDegrees: frame.yawDegrees, pitchDegrees: frame.pitchDegrees, frame: frame
+            ))
+            var retiredURLs: [URL] = []
+            if saved.frames.count > SweepFrameReducer.preferredFrameCount {
+                let frames = saved.frames
+                let plan = saved.plan
+                let retained = await Task.detached(priority: .userInitiated) {
+                    SweepFrameReducer.reduced(frames, plan: plan)
+                }.value
+                guard isCurrent() else { store.removePhoto(at: url); return nil }
+                let retainedIDs = Set(retained.map(\.id))
+                retiredURLs = frames.filter { !retainedIDs.contains($0.id) }.map(\.fileURL)
+                saved.slots.removeAll { $0.frame.map { !retainedIDs.contains($0.id) } ?? false }
+            }
+            // Only durable files enter the manifest and the stitch snapshot.
+            saved.coverageFraction = CoverageTracker(plan: saved.plan, frames: saved.frames).fraction
+            saved.updatedAt = Date()
+            do { try await store.saveAsync(saved) }
+            catch {
+                store.removePhoto(at: url)
+                throw error
+            }
+            guard isCurrent() else {
+                store.removePhoto(at: url)
+                return nil
+            }
+            snapshot = saved
+            retiredURLs.forEach { store.removePhoto(at: $0) }
+            publish(saved)
+            return frame
+        } catch {
+            guard generation == lifecycleGeneration else { return nil }
+            pause()
+            status = .failed(error.localizedDescription)
+            return nil
+        }
+    }
+
+    private func selectedFrameFinished() {
+        guard status == .capturing, let saved = snapshot else { return }
+        let liveTracker = CoverageTracker(plan: saved.plan, frames: saved.frames + frameQueue.frames)
+        tracker = liveTracker
+        coverage = liveTracker.coverage(viewYaw: latestReading?.yawDegrees ?? 0,
+                                        viewPitch: latestReading?.pitchDegrees ?? 0)
+        if automaticFinishRequested, frameQueue.count == 0, !finishInProgress {
+            Task { [weak self] in
+                guard let self, self.status == .capturing else { return }
+                do { _ = try await self.stopSweep() }
+                catch {
+                    guard self.status == .capturing else { return }
+                    self.pause()
+                    self.status = .failed(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func cancelPendingCaptures() {
+        let hadPending = frameQueue.count > 0 || finishInProgress
+        frameQueue.cancel()
+        automaticFinishRequested = false
+        finishInProgress = false
+        isFinishingSweep = false
+        if let saved = snapshot {
+            // Serialize this behind any file write already in progress, so a
+            // paused session only references the confirmed images on screen.
+            if hadPending { try? store.save(saved) }
+            tracker = CoverageTracker(plan: saved.plan, frames: saved.frames)
+            coverage = tracker?.coverage(viewYaw: latestReading?.yawDegrees ?? 0,
+                                         viewPitch: latestReading?.pitchDegrees ?? 0)
         }
     }
 
@@ -717,15 +859,6 @@ final class CaptureController: ObservableObject {
     }
 
     private func ensureCameraPermission() async throws {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:
-            return
-        case .notDetermined:
-            guard await AVCaptureDevice.requestAccess(for: .video) else {
-                throw CaptureError.cameraPermissionDenied
-            }
-        default:
-            throw CaptureError.cameraPermissionDenied
-        }
+        try await camera.ensurePermission()
     }
 }

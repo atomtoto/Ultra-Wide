@@ -4,6 +4,43 @@ import XCTest
 @testable import UltraWide
 
 final class NativeStitchIntegrationTests: XCTestCase {
+    func testTiltedVideoSweepStillExportsRequestedFieldOnIPhone() async throws {
+#if targetEnvironment(simulator)
+        throw XCTSkip("The bundled OpenCV framework is built for a physical iPhone.")
+#else
+        let plan = try XCTUnwrap(CapturePlan.make(
+            lens: .wide, target: .half, orientation: .portrait,
+            wideHorizontalFOV: 70, lensHorizontalFOV: 70,
+            sourceLandscapeAspectRatio: 16.0 / 9.0
+        ))
+        let positions: [(Double, Double)] = [
+            (0, 0), (-32, -32), (0, -32), (32, -32), (-32, 0),
+            (32, 0), (-32, 32), (0, 32), (32, 32)
+        ]
+        let bundle = Bundle(for: Self.self)
+        let inputs = try positions.enumerated().map { index, position -> StitchInput in
+            let name = String(format: "tilt%02d", index)
+            let url = try XCTUnwrap(bundle.url(forResource: name, withExtension: "jpg",
+                subdirectory: "Fixtures/TiltedSweep") ?? bundle.url(forResource: name, withExtension: "jpg"))
+            return StitchInput(url: url, yawRadians: position.0 * .pi / 180,
+                pitchRadians: position.1 * .pi / 180, rollRadians: index == 0 ? 0 : 15 * .pi / 180)
+        }
+        let output = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).heic")
+        defer { try? FileManager.default.removeItem(at: output) }
+        let result = try await StitchingEngine().stitch(
+            inputs: inputs, outputURL: output, maximumMegapixels: 4, targetAspectRatio: 3.0 / 4.0,
+            minimumHorizontalFOVDegrees: plan.targetHorizontalFOV,
+            minimumVerticalFOVDegrees: plan.targetVerticalFOV
+        )
+        XCTAssertGreaterThanOrEqual(result.usedFrameIndices.count, 8)
+        XCTAssertGreaterThan(result.pixelWidth * result.pixelHeight, 100_000)
+        XCTAssertEqual(Double(result.pixelWidth) / Double(result.pixelHeight), 3.0 / 4.0, accuracy: 0.01)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(result.imageURL as CFURL, nil))
+        XCTAssertEqual(CGImageSourceGetCount(source), 1)
+#endif
+    }
+
     func testCompletePortraitSweepExportsHEIFOnIPhone() async throws {
 #if targetEnvironment(simulator)
         throw XCTSkip("The bundled OpenCV framework is built for a physical iPhone.")

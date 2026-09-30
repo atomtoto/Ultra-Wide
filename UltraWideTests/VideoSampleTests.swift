@@ -36,15 +36,12 @@ final class VideoSampleTests: XCTestCase {
         return result
     }
 
-    func testSmoothSceneCanBeEncodedAfterBoundedQualityWait() async throws {
+    func testSmoothSceneIsEncodedImmediatelyWithoutSharpnessWait() async throws {
         let camera = CameraService()
         let buffer = try pixels(gradient: true)
         let initial = try await camera.encodeVideoSample(buffer)
         XCTAssertEqual(initial.quality.quality, .soft)
-        XCTAssertNil(initial.data)
-
-        let accepted = try await camera.encodeVideoSample(buffer, allowSoftFrame: true)
-        let data = try XCTUnwrap(accepted.data)
+        let data = try XCTUnwrap(initial.data)
         let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
         let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
         XCTAssertEqual(image.width, 640)
@@ -52,8 +49,7 @@ final class VideoSampleTests: XCTestCase {
     }
 
     func testBlackVideoSampleIsRejectedBeforeEncoding() async throws {
-        let sample = try await CameraService().encodeVideoSample(pixels(gradient: false),
-                                                                allowSoftFrame: true)
+        let sample = try await CameraService().encodeVideoSample(pixels(gradient: false))
         XCTAssertEqual(sample.quality.quality, .dark)
         XCTAssertNil(sample.data)
     }
@@ -64,5 +60,30 @@ final class VideoSampleTests: XCTestCase {
         )
         XCTAssertEqual(sample.quality.quality, .good)
         XCTAssertNotNil(sample.data)
+    }
+
+    func testNativeLumaAnalysisNeedsNoRenderAndNormalizesVideoRange() throws {
+        for videoRange in [false, true] {
+            var buffer: CVPixelBuffer?
+            XCTAssertEqual(CVPixelBufferCreate(kCFAllocatorDefault, 1920, 1440,
+                videoRange ? kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                    : kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+                [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &buffer), kCVReturnSuccess)
+            let image = try XCTUnwrap(buffer)
+            CVPixelBufferLockBaseAddress(image, [])
+            let base = try XCTUnwrap(CVPixelBufferGetBaseAddressOfPlane(image, 0))
+                .assumingMemoryBound(to: UInt8.self)
+            let stride = CVPixelBufferGetBytesPerRowOfPlane(image, 0)
+            for y in 0..<1440 {
+                for x in 0..<1920 {
+                    let value = (x / 120 + y / 120).isMultiple(of: 2) ? 48 : 224
+                    base[y * stride + x] = UInt8(videoRange ? 16 + value * 219 / 255 : value)
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(image, [])
+            let quality = PhotoQualityAnalyzer.analyze(image)
+            XCTAssertEqual(quality.quality, .good)
+            XCTAssertEqual(quality.brightness, 136.0 / 255.0, accuracy: 0.01)
+        }
     }
 }

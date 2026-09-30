@@ -75,23 +75,26 @@ final class CameraPipelineIntegrationTests: XCTestCase {
         _ = try await camera.videoLandscapeAspectRatio()
         try await camera.prepareForSweep()
         let device = try XCTUnwrap(CameraService.device(for: .wide))
-        let limit = max(1.0 / 120.0, device.activeFormat.minExposureDuration.seconds)
+        let limit = max(1.0 / 240.0, device.activeFormat.minExposureDuration.seconds)
         XCTAssertLessThanOrEqual(device.activeMaxExposureDuration.seconds, limit + 0.000001)
 
         var timings: [Double] = []
+        var selectionTimings: [Double] = []
         for _ in 0..<5 {
             let started = CACurrentMediaTime()
-            let sample = try await camera.captureVideoSample(near: started, allowLowQuality: true)
+            let selected = try await camera.selectVideoFrame(near: started)
+            selectionTimings.append(CACurrentMediaTime() - started)
+            XCTAssertLessThan(abs(selected.timestamp - started), 0.20)
+            let data = try await camera.encodeSelectedFrame(selected)
             timings.append(CACurrentMediaTime() - started)
-            let data = try XCTUnwrap(sample.data)
             let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
             XCTAssertEqual(CGImageSourceGetCount(source), 1)
-            XCTAssertTrue(sample.quality.sharpness.isFinite)
+            XCTAssertTrue(selected.quality.sharpness.isFinite)
         }
-        let attachment = XCTAttachment(string: timings.map {
-            String(format: "%.3f s", $0)
+        let attachment = XCTAttachment(string: zip(selectionTimings, timings).map {
+            String(format: "Selection: %.4f s; selection + encoding: %.4f s", $0, $1)
         }.joined(separator: "\n"))
-        attachment.name = "Video sample analysis and encoding latency"
+        attachment.name = "Separate selection and JPEG latency"
         attachment.lifetime = .keepAlways
         add(attachment)
         await camera.pauseAndWait()

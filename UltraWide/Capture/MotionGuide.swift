@@ -14,13 +14,14 @@ struct MotionReading: Sendable {
 /// Motion is sampled on the main actor so UI guidance never races with slot
 /// changes. The first sample defines the center of the sweep.
 @MainActor
-final class MotionGuide {
+final class MotionGuide: CaptureMotionProviding {
     private let manager = CMMotionManager()
     private var reference: CMRotationMatrix?
     private var matrixMapsDeviceToReference: Bool?
     private var orientation: CaptureOrientation = .portrait
     private var samplingTask: Task<Void, Never>?
     private var referenceExpiryTask: Task<Void, Never>?
+    private var history = MotionReadingHistory()
     var onReading: ((MotionReading) -> Void)?
 
     var isAvailable: Bool { manager.isDeviceMotionAvailable }
@@ -38,6 +39,7 @@ final class MotionGuide {
             manager.stopDeviceMotionUpdates()
             reference = nil
             matrixMapsDeviceToReference = nil
+            history.removeAll()
         }
         self.orientation = orientation
         manager.deviceMotionUpdateInterval = 1.0 / 30.0
@@ -59,6 +61,7 @@ final class MotionGuide {
         manager.stopDeviceMotionUpdates()
         reference = nil
         matrixMapsDeviceToReference = nil
+        history.removeAll()
     }
 
     func suspendSampling() {
@@ -100,8 +103,18 @@ final class MotionGuide {
             orientationMatchesConfiguration: orientationMatches(motion.gravity),
             sampleTimestamp: motion.timestamp
         )
-        onReading?(centered)
+        history.removeAll()
+        publish(centered)
         return centered
+    }
+
+    func reading(near timestamp: TimeInterval) -> MotionReading? {
+        history.reading(near: timestamp)
+    }
+
+    private func publish(_ reading: MotionReading) {
+        history.append(reading)
+        onReading?(reading)
     }
 
     private func orientationMatches(_ gravity: CMAcceleration) -> Bool {
@@ -164,7 +177,7 @@ final class MotionGuide {
         let expectedUp = (initialUp - forward * initialUp.dot(forward)).normalized
         let roll = atan2(expectedUp.cross(up).dot(forward), expectedUp.dot(up))
         let rate = motion.rotationRate
-        onReading?(
+        publish(
             MotionReading(
                 yawDegrees: yaw * 180 / .pi,
                 pitchDegrees: pitch * 180 / .pi,
@@ -173,6 +186,40 @@ final class MotionGuide {
                 orientationMatchesConfiguration: orientationMatches(gravity),
                 sampleTimestamp: motion.timestamp
             )
+        )
+    }
+}
+
+/// Match a camera exposure to its pose, rather than to the later callback or
+/// JPEG completion. Never interpolate across a reference reset.
+struct MotionReadingHistory {
+    private var readings: [MotionReading] = []
+
+    mutating func append(_ reading: MotionReading) {
+        guard readings.last.map({ reading.sampleTimestamp > $0.sampleTimestamp }) ?? true else { return }
+        readings.append(reading)
+        readings.removeAll { $0.sampleTimestamp < reading.sampleTimestamp - 0.5 }
+    }
+
+    mutating func removeAll() { readings.removeAll(keepingCapacity: true) }
+
+    func reading(near timestamp: TimeInterval) -> MotionReading? {
+        guard let nearest = readings.min(by: {
+            abs($0.sampleTimestamp - timestamp) < abs($1.sampleTimestamp - timestamp)
+        }), abs(nearest.sampleTimestamp - timestamp) <= 0.10 else { return nil }
+        guard let after = readings.first(where: { $0.sampleTimestamp >= timestamp }),
+              let before = readings.last(where: { $0.sampleTimestamp <= timestamp }),
+              after.sampleTimestamp > before.sampleTimestamp else { return nearest }
+        let weight = (timestamp - before.sampleTimestamp) / (after.sampleTimestamp - before.sampleTimestamp)
+        func interpolate(_ start: Double, _ end: Double) -> Double { start + (end - start) * weight }
+        return MotionReading(
+            yawDegrees: interpolate(before.yawDegrees, after.yawDegrees),
+            pitchDegrees: interpolate(before.pitchDegrees, after.pitchDegrees),
+            rollDegrees: interpolate(before.rollDegrees, after.rollDegrees),
+            angularSpeed: max(before.angularSpeed, after.angularSpeed),
+            orientationMatchesConfiguration: before.orientationMatchesConfiguration
+                && after.orientationMatchesConfiguration,
+            sampleTimestamp: timestamp
         )
     }
 }

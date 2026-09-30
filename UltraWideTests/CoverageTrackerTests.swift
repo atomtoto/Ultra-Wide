@@ -61,12 +61,16 @@ final class CoverageTrackerTests: XCTestCase {
     }
 
     func testConnectedFreeSweepCompletesWithinFrameBudget() throws {
-        var tracker = CoverageTracker(plan: try plan())
+        let landscape = try plan()
+        var tracker = CoverageTracker(plan: landscape)
+        var retained: [CapturedFrame] = []
         var accepted = 0
         func consider(_ yaw: Double, _ pitch: Double) {
             if tracker.shouldKeep(yaw: yaw, pitch: pitch) {
-                tracker.include(yaw: yaw, pitch: pitch)
-                accepted += 1
+                retained.append(frame(yaw: yaw, pitch: pitch))
+                retained = SweepFrameReducer.reduced(retained, plan: landscape)
+                tracker = CoverageTracker(plan: landscape, frames: retained)
+                accepted = max(accepted, retained.count)
             }
         }
         consider(0, 0)
@@ -97,11 +101,14 @@ final class CoverageTrackerTests: XCTestCase {
             sourceLandscapeAspectRatio: 16.0 / 9.0
         ))
         var tracker = CoverageTracker(plan: portrait)
+        var retained: [CapturedFrame] = []
         var accepted = 0
         func consider(_ yaw: Double, _ pitch: Double) {
             if tracker.shouldKeep(yaw: yaw, pitch: pitch) {
-                tracker.include(yaw: yaw, pitch: pitch)
-                accepted += 1
+                retained.append(frame(yaw: yaw, pitch: pitch))
+                retained = SweepFrameReducer.reduced(retained, plan: portrait)
+                tracker = CoverageTracker(plan: portrait, frames: retained)
+                accepted = max(accepted, retained.count)
             }
         }
         consider(0, 0)
@@ -123,5 +130,40 @@ final class CoverageTrackerTests: XCTestCase {
         }
         XCTAssertTrue(tracker.isComplete)
         XCTAssertLessThanOrEqual(accepted, 40)
+    }
+
+    func testSmallFinalCornerAdjustmentIsCapturedWithoutAnotherLargeTurn() throws {
+        let portrait = try XCTUnwrap(CapturePlan.make(
+            lens: .wide, target: .half, orientation: .portrait,
+            wideHorizontalFOV: 75, lensHorizontalFOV: 75,
+            sourceLandscapeAspectRatio: 16.0 / 9.0
+        ))
+        var tracker = CoverageTracker(plan: portrait)
+        for yaw in [-29.0, 0, 29] {
+            for pitch in [-29.0, 0, 29] {
+                tracker.include(yaw: yaw == -29 && pitch == -29 ? -28 : yaw, pitch: pitch)
+            }
+        }
+        XCTAssertEqual(tracker.fraction, 0.995102, accuracy: 0.00001)
+        XCTAssertFalse(tracker.isComplete)
+        XCTAssertFalse(tracker.shouldKeep(yaw: -28, pitch: -29))
+        XCTAssertTrue(tracker.shouldKeep(yaw: -29, pitch: -29))
+        tracker.include(yaw: -29, pitch: -29)
+        XCTAssertTrue(tracker.isComplete)
+    }
+
+    func testSmallUsefulTurnCanBeCapturedInsteadOfWaitingForThirdOfField() throws {
+        var tracker = CoverageTracker(plan: try plan())
+        tracker.include(yaw: 0, pitch: 0)
+        XCTAssertTrue(tracker.shouldKeep(yaw: 9, pitch: 0))
+        XCTAssertFalse(tracker.shouldKeep(yaw: 0, pitch: 0))
+    }
+
+    private func frame(yaw: Double, pitch: Double) -> CapturedFrame {
+        let id = UUID()
+        return CapturedFrame(id: id, slotID: id.uuidString,
+            fileURL: FileManager.default.temporaryDirectory.appendingPathComponent("\(id).jpg"),
+            pass: 1, capturedAt: Date(), yawDegrees: yaw, pitchDegrees: pitch, rollDegrees: 0,
+            sharpnessScore: 100, meanBrightness: 0.5, quality: .good)
     }
 }

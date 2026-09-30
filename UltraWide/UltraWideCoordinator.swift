@@ -59,7 +59,7 @@ final class UltraWideCoordinator {
             await resumeSavedSweep()
         case .stopSweep, .finishPass:
             do {
-                _ = try capture.stopSweep()
+                _ = try await capture.stopSweep()
                 ui.issue = nil
                 synchronize()
             } catch {
@@ -350,7 +350,7 @@ final class UltraWideCoordinator {
         }
         ui.sweep.isRecording = capture.status == .capturing
         ui.sweep.isComplete = capture.currentSnapshot?.isComplete ?? false
-        ui.sweep.isFinishing = isAssembling || ui.phase == .processing
+        ui.sweep.isFinishing = capture.isFinishingSweep || isAssembling || ui.phase == .processing
 
         if capture.orientationNeedsCorrection {
             ui.banner = message("Gardez l’orientation du départ.", "Keep the starting orientation.")

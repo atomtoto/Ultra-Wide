@@ -112,6 +112,7 @@ final class CameraService: @unchecked Sendable {
         }
         if device.isExposureModeSupported(.continuousAutoExposure) {
             device.exposureMode = .continuousAutoExposure
+            device.activeMaxExposureDuration = .invalid
         }
         if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
             device.whiteBalanceMode = .continuousAutoWhiteBalance
@@ -194,6 +195,13 @@ final class CameraService: @unchecked Sendable {
                     try device.lockForConfiguration()
                     if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
                     if device.isWhiteBalanceModeSupported(.locked) { device.whiteBalanceMode = .locked }
+                    if device.isExposureModeSupported(.continuousAutoExposure) {
+                        device.activeMaxExposureDuration = CMTimeMaximum(
+                            device.activeFormat.minExposureDuration,
+                            CMTimeMinimum(device.activeFormat.maxExposureDuration,
+                                          CMTime(value: 1, timescale: 120))
+                        )
+                    }
                     device.unlockForConfiguration()
                     continuation.resume()
                 } catch {
@@ -206,12 +214,47 @@ final class CameraService: @unchecked Sendable {
     /// Select the video buffer before enqueuing JPEG encoding. Its arrival
     /// must be close to the motion reading that will describe its geometry.
     func captureVideoFrame(near motionTimestamp: TimeInterval) async throws -> Data {
+        let sample = try await captureVideoSample(near: motionTimestamp, allowLowQuality: true)
+        guard let data = sample.data else { throw CaptureError.photoDataUnavailable }
+        return data
+    }
+
+    /// Assess a small uncompressed preview off the main actor. Rejected
+    /// samples never incur full-resolution rendering or JPEG encoding.
+    func captureVideoSample(
+        near motionTimestamp: TimeInterval,
+        allowSoftFrame: Bool = false,
+        allowLowQuality: Bool = false
+    ) async throws -> VideoCaptureSample {
         guard let frame = frameCache.latest(near: motionTimestamp, maxAge: 0.20) else {
             throw CaptureError.photoDataUnavailable
         }
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
+        return try await encodeVideoSample(frame.pixelBuffer, allowSoftFrame: allowSoftFrame,
+                                           allowLowQuality: allowLowQuality)
+    }
+
+    func encodeVideoSample(
+        _ pixelBuffer: CVPixelBuffer,
+        allowSoftFrame: Bool = false,
+        allowLowQuality: Bool = false
+    ) async throws -> VideoCaptureSample {
+        let frame = VideoFrame(pixelBuffer: pixelBuffer)
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VideoCaptureSample, Error>) in
             encodingQueue.async { [self] in
                 let image = CIImage(cvPixelBuffer: frame.pixelBuffer)
+                let scale = min(1, 192 / max(image.extent.width, image.extent.height))
+                let thumbnail = image.applyingFilter("CILanczosScaleTransform", parameters: [
+                    kCIInputScaleKey: scale, kCIInputAspectRatioKey: 1
+                ])
+                let quality = imageContext.createCGImage(thumbnail, from: thumbnail.extent)
+                    .map { PhotoQualityAnalyzer.analyze($0) }
+                    ?? PhotoQualityResult(sharpness: 0, brightness: 0, quality: .unknown)
+                guard allowLowQuality || SweepCapturePolicy.shouldEncode(
+                    quality, allowSoftFrame: allowSoftFrame
+                ) else {
+                    continuation.resume(returning: VideoCaptureSample(data: nil, quality: quality))
+                    return
+                }
                 guard let cgImage = imageContext.createCGImage(image, from: image.extent),
                       let destinationData = CFDataCreateMutable(nil, 0),
                       let destination = CGImageDestinationCreateWithData(
@@ -227,7 +270,9 @@ final class CameraService: @unchecked Sendable {
                     continuation.resume(throwing: CaptureError.photoDataUnavailable)
                     return
                 }
-                continuation.resume(returning: destinationData as Data)
+                continuation.resume(returning: VideoCaptureSample(
+                    data: destinationData as Data, quality: quality
+                ))
             }
         }
     }
@@ -339,6 +384,11 @@ final class CameraService: @unchecked Sendable {
         }
         return SinglePhotoResult(url: url, pixelWidth: cropWidth, pixelHeight: cropHeight)
     }
+}
+
+struct VideoCaptureSample: Sendable {
+    let data: Data?
+    let quality: PhotoQualityResult
 }
 
 struct SinglePhotoResult: Sendable {

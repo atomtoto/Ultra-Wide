@@ -29,6 +29,7 @@ final class CaptureController: ObservableObject {
     private var lifecycleGeneration = 0
     private var lastAttemptAt: TimeInterval = 0
     private var consecutiveMissingFrames = 0
+    private var sweepCapturePolicy = SweepCapturePolicy()
     private var repairMode = false
     private var repairFrameCount = 0
     private var repairEdgeFrameCount = 0
@@ -263,6 +264,7 @@ final class CaptureController: ObservableObject {
         }
         lastAttemptAt = 0
         consecutiveMissingFrames = 0
+        sweepCapturePolicy.reset()
         coverage = tracker?.coverage(viewYaw: 0, viewPitch: 0)
         status = .capturing
         // Select the video buffer while the phone still points at the center.
@@ -591,9 +593,9 @@ final class CaptureController: ObservableObject {
         if coverage != displayed { coverage = displayed }
         guard status == .capturing, !captureRequested, !wrongOrientation,
               abs(reading.rollDegrees) < 6,
-              reading.angularSpeed < 0.7,
+              reading.angularSpeed < SweepCapturePolicy.maximumAngularSpeed,
               completedCount < maximumFrames,
-              CACurrentMediaTime() - lastAttemptAt >= 0.12,
+              CACurrentMediaTime() - lastAttemptAt >= SweepCapturePolicy.minimumFrameInterval,
               tracker.shouldKeep(yaw: reading.yawDegrees,
                                  pitch: reading.pitchDegrees,
                                  repairMode: repairMode) else { return }
@@ -618,14 +620,21 @@ final class CaptureController: ObservableObject {
               abs(reading.rollDegrees) < 8,
               saved.frames.count < maximumFrames else { return nil }
         do {
-            let data = try await camera.captureVideoFrame(near: reading.sampleTimestamp)
+            let sample = try await camera.captureVideoSample(
+                near: reading.sampleTimestamp,
+                allowSoftFrame: sweepCapturePolicy.allowsSoftFrame(
+                    at: CACurrentMediaTime(), angularSpeed: reading.angularSpeed
+                ),
+                allowLowQuality: allowLowQuality
+            )
             guard generation == lifecycleGeneration, status == .capturing,
                   snapshot?.sessionID == saved.sessionID,
                   snapshot?.slots.count == saved.slots.count,
                   saved.frames.count < maximumFrames else { return nil }
             consecutiveMissingFrames = 0
-            let quality = PhotoQualityAnalyzer.analyze(data)
-            guard allowLowQuality || (quality.quality != .soft && quality.quality != .dark) else {
+            let quality = sample.quality
+            guard let data = sample.data else {
+                sweepCapturePolicy.rejected(quality, at: CACurrentMediaTime())
                 return nil
             }
             guard tracker.shouldKeep(yaw: reading.yawDegrees,
@@ -667,6 +676,7 @@ final class CaptureController: ObservableObject {
             }
             snapshot = saved
             self.tracker = newTracker
+            sweepCapturePolicy.reset()
             publish(saved)
             coverage = newTracker.coverage(viewYaw: latestReading?.yawDegrees ?? reading.yawDegrees,
                                            viewPitch: latestReading?.pitchDegrees ?? reading.pitchDegrees)

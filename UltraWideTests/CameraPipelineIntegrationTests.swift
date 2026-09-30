@@ -61,4 +61,40 @@ final class CameraPipelineIntegrationTests: XCTestCase {
         await camera.pauseAndWait()
 #endif
     }
+
+    func testSweepExposureAndVideoSampleProcessingOnIPhone() async throws {
+#if targetEnvironment(simulator)
+        throw XCTSkip("A physical rear camera is required.")
+#else
+        guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else {
+            throw XCTSkip("Grant Camera access in Ultra Wide to run the live camera test.")
+        }
+        let camera = CameraService()
+        try await camera.configure(lens: .wide, orientation: .portrait)
+        defer { camera.pause() }
+        _ = try await camera.videoLandscapeAspectRatio()
+        try await camera.prepareForSweep()
+        let device = try XCTUnwrap(CameraService.device(for: .wide))
+        let limit = max(1.0 / 120.0, device.activeFormat.minExposureDuration.seconds)
+        XCTAssertLessThanOrEqual(device.activeMaxExposureDuration.seconds, limit + 0.000001)
+
+        var timings: [Double] = []
+        for _ in 0..<5 {
+            let started = CACurrentMediaTime()
+            let sample = try await camera.captureVideoSample(near: started, allowLowQuality: true)
+            timings.append(CACurrentMediaTime() - started)
+            let data = try XCTUnwrap(sample.data)
+            let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
+            XCTAssertEqual(CGImageSourceGetCount(source), 1)
+            XCTAssertTrue(sample.quality.sharpness.isFinite)
+        }
+        let attachment = XCTAttachment(string: timings.map {
+            String(format: "%.3f s", $0)
+        }.joined(separator: "\n"))
+        attachment.name = "Video sample analysis and encoding latency"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+        await camera.pauseAndWait()
+#endif
+    }
 }

@@ -680,10 +680,11 @@ private struct CoverageMap: View {
     var body: some View {
         Canvas { context, size in
             let inset: CGFloat = 4
+            let cornerRadius: CGFloat = 18
             let bounds = CGRect(x: inset, y: inset,
                                 width: max(0, size.width - 2 * inset),
                                 height: max(0, size.height - 2 * inset))
-            let outside = Path(roundedRect: bounds, cornerRadius: 18)
+            let outside = Path(roundedRect: bounds, cornerRadius: cornerRadius)
             context.fill(outside, with: .color(.white.opacity(0.06)))
 
             var inside = context
@@ -696,7 +697,7 @@ private struct CoverageMap: View {
             inside.fill(covered, with: .color(CameraPalette.accent.opacity(0.38)))
             context.stroke(outside, with: .color(.white.opacity(0.86)), lineWidth: 1.7)
 
-            let lens = Path(roundedRect: mapped(sweep.viewRect, in: bounds), cornerRadius: 10)
+            let lens = Path(roundedRect: mapped(sweep.viewRect, in: bounds), cornerRadius: cornerRadius)
             context.fill(lens, with: .color(CameraPalette.accent.opacity(0.20)))
             context.stroke(lens, with: .color(CameraPalette.accent), lineWidth: 2.6)
         }

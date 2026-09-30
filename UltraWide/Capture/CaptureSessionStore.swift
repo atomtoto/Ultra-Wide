@@ -139,7 +139,10 @@ enum PhotoQualityAnalyzer {
               ] as CFDictionary) else {
             return PhotoQualityResult(sharpness: 0, brightness: 0, quality: .unknown)
         }
+        return analyze(image)
+    }
 
+    static func analyze(_ image: CGImage) -> PhotoQualityResult {
         let scale = min(1, 192 / Double(max(image.width, image.height)))
         let width = Int((Double(image.width) * scale).rounded())
         let height = Int((Double(image.height) * scale).rounded())

@@ -71,6 +71,21 @@
           }
         },
         {
+          "blend-mode" : "lighten",
+          "glass" : false,
+          "hidden" : false,
+          "image-name" : "Mountain Glow.svg",
+          "name" : "Mountain Glow",
+          "opacity" : 1,
+          "position" : {
+            "scale" : 6,
+            "translation-in-points" : [
+              0,
+              -60
+            ]
+          }
+        },
+        {
           "blend-mode" : "plus-lighter",
           "fill" : {
             "linear-gradient" : [

@@ -18,6 +18,7 @@ final class UltraWideCoordinator {
     private var automaticAssemblyKey: String?
     private var orientationBannerActive = false
     private var lastOutputURL: URL?
+    private var lastAssemblyPreview: CGImage?
 
     init() {
         ui.onAction = { [weak self] action in
@@ -45,7 +46,8 @@ final class UltraWideCoordinator {
                     canRetry: false
                 )
             } else if capture.currentSnapshot == nil,
-                      (capture.status == .idle || capture.status.isFailure) {
+                      (capture.status == .idle || capture.status.isFailure
+                       || (capture.status == .ready && capture.plan?.orientation != currentOrientation())) {
                 await preparePreview()
             }
         case .selectLens:
@@ -53,6 +55,14 @@ final class UltraWideCoordinator {
             if capture.currentSnapshot == nil { await preparePreview() }
         case .selectTarget:
             if capture.currentSnapshot == nil { await preparePreview() }
+        case .selectLighting(let lighting):
+            guard capture.currentSnapshot == nil, capture.status != .capturing,
+                  !ui.isStarting, ui.phase == .setup else {
+                ui.selectedLighting = .saved()
+                return
+            }
+            UserDefaults.standard.set(lighting.rawValue, forKey: CaptureLighting.preferenceKey)
+            await preparePreview()
         case .start, .startSweep:
             await beginOrResumeSweep()
         case .resume:
@@ -132,7 +142,8 @@ final class UltraWideCoordinator {
     private func beginOrResumeSweep() async {
         ui.isStarting = true
         do {
-            if capture.currentSnapshot == nil && capture.status != .ready {
+            if capture.currentSnapshot == nil
+                && (capture.status != .ready || capture.plan?.orientation != currentOrientation()) {
                 let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
                 let target = CaptureTarget(rawValue: ui.selectedTarget.rawValue) ?? .half
                 try await capture.preparePreview(lens: lens, target: target,
@@ -234,7 +245,7 @@ final class UltraWideCoordinator {
             return
         }
 
-        let inputs = snapshot.frames.map { frame in
+        let capturedInputs = snapshot.frames.map { frame in
             StitchInput(
                 url: frame.fileURL,
                 yawRadians: frame.yawDegrees * .pi / 180,
@@ -242,6 +253,9 @@ final class UltraWideCoordinator {
                 rollRadians: frame.rollDegrees * .pi / 180
             )
         }
+        let preparedInputs = capture.preparedStitchInputs
+        let usesPreparedAlignment = (preparedInputs?.count ?? 0) >= 2
+        let inputs = usesPreparedAlignment ? (preparedInputs ?? capturedInputs) : capturedInputs
         do {
             let result = try await stitcher.stitch(
                 inputs: inputs,
@@ -249,7 +263,8 @@ final class UltraWideCoordinator {
                 maximumMegapixels: 16,
                 targetAspectRatio: snapshot.plan.orientation.isPortrait ? 3.0 / 4.0 : 4.0 / 3.0,
                 minimumHorizontalFOVDegrees: snapshot.plan.targetHorizontalFOV,
-                minimumVerticalFOVDegrees: snapshot.plan.targetVerticalFOV
+                minimumVerticalFOVDegrees: snapshot.plan.targetVerticalFOV,
+                preparedFocalRatio: usesPreparedAlignment ? capture.preparedFocalRatio : nil
             ) { [weak self] fraction in
                 Task { @MainActor [weak self] in self?.ui.processingProgress = fraction }
             }
@@ -343,17 +358,34 @@ final class UltraWideCoordinator {
         updateAvailableTargets()
         if let coverage = capture.coverage {
             ui.sweep.viewRect = coverage.viewRect
-            ui.sweep.coveredRects = coverage.coveredRects
-            ui.sweep.coverageFraction = coverage.fraction
         } else {
-            ui.sweep = CaptureUISweep()
+            ui.sweep.viewRect = CaptureUISweep().viewRect
         }
+        if let visual = capture.visualCoverage {
+            // Motion positions guide the live camera frame; only image alignment
+            // contributes to the completed field shown to the photographer.
+            ui.sweep.coveredRects = []
+            if ui.sweep.coveredPolygons != visual.polygons {
+                ui.sweep.coveredPolygons = visual.polygons
+            }
+            ui.sweep.coverageFraction = visual.fraction
+            ui.sweep.isComplete = visual.isComplete
+        } else {
+            ui.sweep.coveredRects = []
+            ui.sweep.coveredPolygons = []
+            ui.sweep.coverageFraction = 0
+            ui.sweep.isComplete = false
+        }
+        if capture.assemblyPreview !== lastAssemblyPreview {
+            lastAssemblyPreview = capture.assemblyPreview
+            ui.sweep.previewImage = capture.assemblyPreview.map { UIImage(cgImage: $0) }
+        }
+        ui.sweep.isVerifyingAlignment = capture.isVerifyingAlignment
         ui.sweep.isRecording = capture.status == .capturing
-        ui.sweep.isComplete = capture.currentSnapshot?.isComplete ?? false
         ui.sweep.isFinishing = capture.isFinishingSweep || isAssembling || ui.phase == .processing
 
-        if capture.orientationNeedsCorrection {
-            ui.banner = message("Gardez l’orientation du départ.", "Keep the starting orientation.")
+        if capture.orientationNeedsCorrection, let correction = capture.orientationCorrection {
+            ui.banner = captureErrorMessage(correction)
             orientationBannerActive = true
         } else if orientationBannerActive {
             ui.banner = nil
@@ -480,6 +512,12 @@ final class UltraWideCoordinator {
         guard let error = error as? CaptureError else {
             return message("La prise de vue a échoué. Réessayez.", "Capture failed. Try again.")
         }
+        if case .orientationChanged = error {
+            let orientation = capture.plan?.orientation ?? currentOrientation()
+            return orientation.isPortrait
+                ? message("Tenez l’iPhone verticalement (mode portrait).", "Hold the iPhone vertically (portrait).")
+                : message("Tenez l’iPhone horizontalement (mode paysage).", "Hold the iPhone horizontally (landscape).")
+        }
         let english: String
         switch error {
         case .cameraPermissionDenied: english = "Allow camera access in Settings."
@@ -490,7 +528,8 @@ final class UltraWideCoordinator {
         case .motionUnavailable: english = "Motion sensors are unavailable."
         case .notReady: english = "Wait for the camera to be ready."
         case .notAligned: english = "Hold the iPhone still."
-        case .orientationChanged: english = "Return to the starting orientation."
+        case .orientationChanged: english = "Hold the iPhone in the orientation of the displayed frame."
+        case .excessiveRoll: english = "Straighten the iPhone to keep the frame level."
         case .noCurrentSlot: english = "No view is selected."
         case .incompletePass: english = "Sweep a little further before stopping."
         case .retakeLimitReached: english = "The sweep reached its frame limit."

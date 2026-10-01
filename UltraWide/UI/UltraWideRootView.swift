@@ -3,7 +3,32 @@ import SwiftUI
 
 private enum CameraPalette {
     static let accent = Color(red: 1.0, green: 0.73, blue: 0.16)
-    static let surface = Color.black.opacity(0.46)
+}
+
+/// Floating camera controls share native glass, with an opaque accessibility fallback.
+private struct CameraGlassSurface<S: Shape>: ViewModifier {
+    var shape: S
+    var isInteractive = false
+    var isSelected = false
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    func body(content: Content) -> some View {
+        if reduceTransparency || contrast == .increased {
+            content.background(isSelected ? CameraPalette.accent : Color(uiColor: .secondarySystemBackground), in: shape)
+                .overlay {
+                    shape.stroke(.white.opacity(isSelected ? 0 : 0.35), lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+        } else {
+            content.glassEffect(
+                .regular
+                    .tint(isSelected ? CameraPalette.accent : .black.opacity(0.16))
+                    .interactive(isInteractive),
+                in: shape
+            )
+        }
+    }
 }
 
 struct UltraWideRootView: View {
@@ -136,7 +161,7 @@ struct UltraWideRootView: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 14, weight: .semibold))
                         .frame(width: 44, height: 44)
-                        .background(CameraPalette.surface, in: Circle())
+                        .modifier(CameraGlassSurface(shape: Circle(), isInteractive: true))
                 }
                 .accessibilityLabel(tr("Annuler la prise de vue", "Cancel capture"))
             } else {
@@ -146,8 +171,42 @@ struct UltraWideRootView: View {
                     .accessibilityHidden(true)
             }
             Spacer()
+            if model.phase == .setup && !model.hasActiveSession {
+                lightingMenu
+            }
         }
         .buttonStyle(.plain)
+    }
+
+    private var lightingMenu: some View {
+        Menu {
+            Picker(tr("Éclairage", "Lighting"), selection: Binding(
+                get: { model.selectedLighting },
+                set: { model.send(.selectLighting($0)) }
+            )) {
+                ForEach(CaptureLighting.allCases) { lighting in
+                    Text(lightingTitle(lighting)).tag(lighting)
+                }
+            }
+        } label: {
+            Label(tr("Éclairage", "Lighting"), systemImage: "lightbulb")
+                .font(.subheadline.weight(.medium))
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .modifier(CameraGlassSurface(shape: Capsule(), isInteractive: !model.isStarting))
+        }
+        .disabled(model.hasActiveSession || model.isStarting || model.phase == .capturing)
+        .accessibilityValue(lightingTitle(model.selectedLighting))
+        .accessibilityHint(tr("Réduire le scintillement sous éclairage artificiel.",
+                              "Reduce flicker under artificial lighting."))
+    }
+
+    private func lightingTitle(_ lighting: CaptureLighting) -> String {
+        switch lighting {
+        case .automatic: tr("Auto (région)", "Auto (region)")
+        case .hz50: "50 Hz"
+        case .hz60: "60 Hz"
+        }
     }
 
     private var showsCameraOptions: Bool {
@@ -155,51 +214,57 @@ struct UltraWideRootView: View {
     }
 
     private var cameraOptions: some View {
-        VStack(spacing: 10) {
-            if model.availableLenses.count > 1 {
-                HStack(spacing: 6) {
-                    ForEach(model.availableLenses) { lens in
-                        Button {
-                            model.send(.selectLens(lens))
-                        } label: {
-                            Text(lens == .wide ? tr("Principal", "Main") : tr("Télé", "Tele"))
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity, minHeight: 44)
-                                .foregroundStyle(model.selectedLens == lens ? .black : .white)
-                                .background(model.selectedLens == lens ? CameraPalette.accent : .white.opacity(0.13), in: Capsule())
+        GlassEffectContainer(spacing: 4) {
+            VStack(spacing: 10) {
+                if model.availableLenses.count > 1 {
+                    HStack(spacing: 6) {
+                        ForEach(model.availableLenses) { lens in
+                            Button {
+                                model.send(.selectLens(lens))
+                            } label: {
+                                Text(lens == .wide ? tr("Principal", "Main") : tr("Télé", "Tele"))
+                                    .font(.subheadline.weight(.semibold))
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .foregroundStyle(model.selectedLens == lens ? .black : .white)
+                                    .modifier(CameraGlassSurface(
+                                        shape: Capsule(),
+                                        isInteractive: !model.isStarting,
+                                        isSelected: model.selectedLens == lens
+                                    ))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.isStarting)
+                            .accessibilityAddTraits(model.selectedLens == lens ? [.isSelected] : [])
                         }
-                        .buttonStyle(.plain)
-                        .disabled(model.isStarting)
-                        .accessibilityAddTraits(model.selectedLens == lens ? [.isSelected] : [])
+                    }
+                }
+                if model.availableTargets.count > 1 {
+                    HStack(spacing: 6) {
+                        ForEach(model.availableTargets) { target in
+                            Button {
+                                model.send(.selectTarget(target))
+                            } label: {
+                                Text(target.magnification(for: locale))
+                                    .font(.subheadline.weight(.semibold))
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                                    .frame(maxWidth: .infinity, minHeight: 44)
+                                    .foregroundStyle(model.selectedTarget == target ? .black : .white)
+                                    .modifier(CameraGlassSurface(
+                                        shape: Capsule(),
+                                        isInteractive: !model.isStarting,
+                                        isSelected: model.selectedTarget == target
+                                    ))
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(model.isStarting)
+                            .accessibilityAddTraits(model.selectedTarget == target ? [.isSelected] : [])
+                        }
                     }
                 }
             }
-            if model.availableTargets.count > 1 {
-                HStack(spacing: 6) {
-                    ForEach(model.availableTargets) { target in
-                        Button {
-                            model.send(.selectTarget(target))
-                        } label: {
-                            Text(target.magnification(for: locale))
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                                .frame(maxWidth: .infinity, minHeight: 44)
-                                .foregroundStyle(model.selectedTarget == target ? CameraPalette.accent : .white)
-                                .background(.black.opacity(0.42), in: Capsule())
-                                .overlay {
-                                    Capsule()
-                                        .strokeBorder(model.selectedTarget == target ? CameraPalette.accent : .clear, lineWidth: 1.5)
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(model.isStarting)
-                        .accessibilityAddTraits(model.selectedTarget == target ? [.isSelected] : [])
-                    }
-                }
-            }
+            .frame(maxWidth: 290)
         }
-        .frame(maxWidth: 290)
     }
 
     private func fieldIndicator(isLandscape: Bool) -> some View {
@@ -238,12 +303,16 @@ struct UltraWideRootView: View {
                 .minimumScaleFactor(0.8)
         }
         .padding(16)
-        .background(CameraPalette.surface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .modifier(CameraGlassSurface(shape: RoundedRectangle(cornerRadius: 24, style: .continuous)))
         .accessibilityElement(children: .contain)
     }
 
     private var fieldHint: String {
-        if model.sweep.isFinishing { return tr("Terminé", "Finishing") }
+        if model.sweep.isFinishing {
+            return model.sweep.isVerifyingAlignment
+                ? tr("Vérification…", "Checking…")
+                : tr("Finalisation…", "Finishing…")
+        }
         if model.phase == .setup {
             return model.hasActiveSession
                 ? tr("Reprendre", "Resume")
@@ -252,6 +321,9 @@ struct UltraWideRootView: View {
                     : tr("Pointez le centre", "Point at the center")
         }
         if model.sweep.isComplete { return tr("Couverture complète", "Coverage complete") }
+        if model.sweep.isVerifyingAlignment && model.phase != .capturing {
+            return tr("Vérification…", "Checking…")
+        }
         return tr("Balayez librement", "Sweep freely")
     }
 
@@ -266,7 +338,7 @@ struct UltraWideRootView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(CameraPalette.surface, in: Capsule())
+                .modifier(CameraGlassSurface(shape: Capsule()))
                 .frame(maxWidth: 350)
         } else if model.phase == .setup && model.previewSession == nil
                     && !model.hasActiveSession && !model.isStarting {
@@ -276,7 +348,8 @@ struct UltraWideRootView: View {
             .font(.footnote.weight(.semibold))
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .background(CameraPalette.surface, in: Capsule())
+            .buttonStyle(.glass)
+            .buttonBorderShape(.capsule)
         }
     }
 
@@ -311,6 +384,7 @@ struct UltraWideRootView: View {
                 }
                 .frame(width: 92, height: 92)
                 .contentShape(Circle())
+                .modifier(CameraGlassSurface(shape: Circle(), isInteractive: !shutterDisabled))
             }
             .buttonStyle(.plain)
             .disabled(shutterDisabled)
@@ -384,7 +458,8 @@ struct UltraWideRootView: View {
             Button(tr("Continuer", "Continue")) {
                 model.send(.confirmReanchor)
             }
-            .buttonStyle(.borderedProminent)
+            .foregroundStyle(.black)
+            .buttonStyle(.glassProminent)
             .controlSize(.large)
             .disabled(model.isStarting)
         }
@@ -423,31 +498,75 @@ struct UltraWideRootView: View {
     }
 
     private var interruptedActions: some View {
-        HStack(spacing: 12) {
-            Button(tr("Continuer", "Continue")) {
-                model.send(.startSweep)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            if model.sweep.isComplete {
-                Button(model.issue == nil
-                       ? tr("Assembler", "Stitch")
-                       : tr("Réessayer", "Try again")) {
-                    model.send(.assemble)
+        GlassEffectContainer(spacing: 8) {
+            HStack(spacing: 12) {
+                Button(tr("Continuer", "Continue")) {
+                    model.send(.startSweep)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.glass)
                 .controlSize(.large)
+                if model.sweep.isComplete {
+                    Button(model.issue == nil
+                           ? tr("Assembler", "Stitch")
+                           : tr("Réessayer", "Try again")) {
+                        model.send(.assemble)
+                    }
+                    .foregroundStyle(.black)
+                    .buttonStyle(.glassProminent)
+                    .controlSize(.large)
+                }
             }
         }
     }
 
     private var processingScreen: some View {
-        VStack(spacing: 20) {
-            Spacer()
+        GeometryReader { geometry in
+            let isLandscape = geometry.size.width > geometry.size.height
+            Group {
+                if model.sweep.previewImage == nil {
+                    processingStatus
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if isLandscape {
+                    HStack(spacing: 28) {
+                        assemblyPreview
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        processingStatus
+                            .frame(maxWidth: 260)
+                    }
+                } else {
+                    VStack(spacing: 28) {
+                        Spacer(minLength: 0)
+                        assemblyPreview
+                            .frame(maxWidth: 390, maxHeight: geometry.size.height * 0.56)
+                        processingStatus
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(24)
+        }
+    }
+
+    @ViewBuilder
+    private var assemblyPreview: some View {
+        if let image = model.sweep.previewImage {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .accessibilityLabel(tr("Aperçu de l’image en cours d’assemblage", "Preview of the image being assembled"))
+        }
+    }
+
+    private var processingStatus: some View {
+        VStack(spacing: 18) {
             ProgressView()
                 .controlSize(.large)
                 .tint(CameraPalette.accent)
-            Text(tr("Assemblage…", "Stitching…"))
+            Text(model.sweep.previewImage != nil
+                 ? tr("Finalisation…", "Finishing…")
+                 : tr("Assemblage…", "Stitching…"))
                 .font(.headline)
             if let progress = model.processingProgress {
                 ProgressView(value: min(max(progress, 0), 1))
@@ -455,9 +574,7 @@ struct UltraWideRootView: View {
                     .frame(maxWidth: 220)
                     .accessibilityLabel(tr("Progression de l’assemblage", "Stitching progress"))
             }
-            Spacer()
         }
-        .padding(24)
     }
 
     private var reviewScreen: some View {
@@ -497,7 +614,7 @@ struct UltraWideRootView: View {
             } label: {
                 Image(systemName: "xmark")
                     .frame(width: 44, height: 44)
-                    .background(CameraPalette.surface, in: Circle())
+                    .modifier(CameraGlassSurface(shape: Circle(), isInteractive: true))
             }
             .accessibilityLabel(tr("Nouvelle prise de vue", "New capture"))
             Spacer()
@@ -536,36 +653,38 @@ struct UltraWideRootView: View {
                     .font(.subheadline)
                     .foregroundStyle(CameraPalette.accent)
             }
-            HStack(spacing: 10) {
-                Button {
-                    model.send(.saveToPhotos)
-                } label: {
-                    HStack(spacing: 8) {
-                        if model.saveState == .saving {
-                            ProgressView().tint(.black)
-                        } else {
-                            Image(systemName: model.saveState == .saved ? "checkmark" : "square.and.arrow.down")
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 10) {
+                    Button {
+                        model.send(.saveToPhotos)
+                    } label: {
+                        HStack(spacing: 8) {
+                            if model.saveState == .saving {
+                                ProgressView().tint(.black)
+                            } else {
+                                Image(systemName: model.saveState == .saved ? "checkmark" : "square.and.arrow.down")
+                            }
+                            Text(model.saveState == .saved ? tr("Enregistrée", "Saved") : tr("Enregistrer", "Save"))
                         }
-                        Text(model.saveState == .saved ? tr("Enregistrée", "Saved") : tr("Enregistrer", "Save"))
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 52)
                     }
-                    .font(.headline)
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(model.resultURL == nil || model.saveState != .idle)
-                if let url = model.resultURL {
-                    ShareLink(item: url) {
-                        Image(systemName: "square.and.arrow.up")
-                            .frame(width: 52, height: 52)
+                    .foregroundStyle(.black)
+                    .buttonStyle(.glassProminent)
+                    .disabled(model.resultURL == nil || model.saveState != .idle)
+                    if let url = model.resultURL {
+                        ShareLink(item: url) {
+                            Image(systemName: "square.and.arrow.up")
+                                .frame(width: 52, height: 52)
+                        }
+                        .buttonStyle(.glass)
+                        .accessibilityLabel(tr("Partager l’image", "Share image"))
                     }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel(tr("Partager l’image", "Share image"))
                 }
             }
         }
         .padding(18)
         .frame(maxWidth: .infinity)
-        .background(CameraPalette.surface, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
     private var unavailableScreen: some View {
@@ -587,14 +706,15 @@ struct UltraWideRootView: View {
                 Button(tr("Ouvrir Réglages", "Open Settings")) {
                     model.send(.openSettings)
                 }
-                .buttonStyle(.borderedProminent)
+                .foregroundStyle(.black)
+                .buttonStyle(.glassProminent)
                 .controlSize(.large)
             }
             if model.issue?.canRetry != false {
                 Button(tr("Réessayer", "Try again")) {
                     model.send(.retry)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.glass)
                 .controlSize(.large)
                 .disabled(model.isStarting)
             }
@@ -608,7 +728,7 @@ struct UltraWideRootView: View {
         } label: {
             Image(systemName: "xmark")
                 .frame(width: 44, height: 44)
-                .background(CameraPalette.surface, in: Circle())
+                .modifier(CameraGlassSurface(shape: Circle(), isInteractive: true))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(tr("Annuler la prise de vue", "Cancel capture"))
@@ -671,8 +791,8 @@ struct UltraWideRootView: View {
     return UltraWideRootView(model: model)
 }
 
-/// The filled area records actual camera footprints. The small amber frame is
-/// the camera's current field of view, positioned inside the final image.
+/// Aligned image footprints cover the progressive photo. The amber frame guides
+/// the current camera position without counting it as verified coverage.
 private struct CoverageMap: View {
     var sweep: CaptureUISweep
     var locale: Locale
@@ -689,16 +809,29 @@ private struct CoverageMap: View {
 
             var inside = context
             inside.clip(to: outside)
-            var covered = Path()
-            for rect in sweep.coveredRects {
-                let painted = mapped(rect, in: bounds)
-                covered.addPath(Path(roundedRect: painted, cornerRadius: 7))
+            if let image = sweep.previewImage {
+                inside.draw(Image(uiImage: image), in: bounds)
             }
-            inside.fill(covered, with: .color(CameraPalette.accent.opacity(0.38)))
+            var covered = Path()
+            if !sweep.coveredPolygons.isEmpty {
+                for polygon in sweep.coveredPolygons where polygon.count >= 3 {
+                    covered.move(to: mapped(polygon[0], in: bounds))
+                    for point in polygon.dropFirst() {
+                        covered.addLine(to: mapped(point, in: bounds))
+                    }
+                    covered.closeSubpath()
+                }
+            } else {
+                for rect in sweep.coveredRects {
+                    let painted = mapped(rect, in: bounds)
+                    covered.addPath(Path(roundedRect: painted, cornerRadius: 7))
+                }
+            }
+            inside.fill(covered, with: .color(CameraPalette.accent.opacity(sweep.previewImage == nil ? 0.38 : 0.08)))
             context.stroke(outside, with: .color(.white.opacity(0.86)), lineWidth: 1.7)
 
             let lens = Path(roundedRect: mapped(sweep.viewRect, in: bounds), cornerRadius: cornerRadius)
-            context.fill(lens, with: .color(CameraPalette.accent.opacity(0.20)))
+            inside.fill(lens, with: .color(CameraPalette.accent.opacity(sweep.previewImage == nil ? 0.20 : 0.06)))
             context.stroke(lens, with: .color(CameraPalette.accent), lineWidth: 2.6)
         }
         .accessibilityElement(children: .ignore)
@@ -717,6 +850,11 @@ private struct CoverageMap: View {
                y: bounds.minY + rect.minY * bounds.height,
                width: max(0, rect.width * bounds.width),
                height: max(0, rect.height * bounds.height))
+    }
+
+    private func mapped(_ point: CGPoint, in bounds: CGRect) -> CGPoint {
+        CGPoint(x: bounds.minX + point.x * bounds.width,
+                y: bounds.minY + point.y * bounds.height)
     }
 }
 

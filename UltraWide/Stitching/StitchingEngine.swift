@@ -1,22 +1,45 @@
 import Foundation
 
+/// A visually verified alignment in the centered, rectilinear target field.
+/// The homography maps oriented source pixels normalized to 0...1 into target
+/// coordinates normalized to 0...1. Both coordinate systems start at top left.
+public struct StitchAlignment: Sendable {
+    public let normalizedHomography: [Double]
+    public let sourcePixelWidth: Int
+    public let sourcePixelHeight: Int
+    /// A scalar exposure correction in linear Display P3. Keeping one gain
+    /// for all channels preserves the captured white balance.
+    public let luminanceGain: Double
+
+    public init(normalizedHomography: [Double], sourcePixelWidth: Int, sourcePixelHeight: Int,
+                luminanceGain: Double = 1) {
+        self.normalizedHomography = normalizedHomography
+        self.sourcePixelWidth = sourcePixelWidth
+        self.sourcePixelHeight = sourcePixelHeight
+        self.luminanceGain = luminanceGain
+    }
+}
+
 /// A still captured during one guided sweep. Angles, when available, are in radians.
 public struct StitchInput: Sendable {
     public let url: URL
     public let yawRadians: Double?
     public let pitchRadians: Double?
     public let rollRadians: Double?
+    public let alignment: StitchAlignment?
 
     public init(
         url: URL,
         yawRadians: Double? = nil,
         pitchRadians: Double? = nil,
-        rollRadians: Double? = nil
+        rollRadians: Double? = nil,
+        alignment: StitchAlignment? = nil
     ) {
         self.url = url
         self.yawRadians = yawRadians
         self.pitchRadians = pitchRadians
         self.rollRadians = rollRadians
+        self.alignment = alignment
     }
 }
 
@@ -26,6 +49,7 @@ public struct StitchResult: Sendable {
     public let pixelHeight: Int
     public let usedFrameIndices: [Int]
     public let rejectedFrameIndices: [Int]
+    public let reusedPreparedAlignment: Bool
 }
 
 public enum StitchingFailure: Error, LocalizedError, Sendable {
@@ -84,6 +108,7 @@ public actor StitchingEngine {
         targetAspectRatio: Double? = nil,
         minimumHorizontalFOVDegrees: Double? = nil,
         minimumVerticalFOVDegrees: Double? = nil,
+        preparedFocalRatio: Double? = nil,
         progress: @escaping @Sendable (Double) -> Void = { _ in }
     ) throws -> StitchResult {
         guard inputs.count >= 2 else { throw StitchingFailure.insufficientImages }
@@ -95,7 +120,11 @@ public actor StitchingEngine {
                 yawRadians: input.yawRadians ?? 0,
                 pitchRadians: input.pitchRadians ?? 0,
                 rollRadians: input.rollRadians ?? 0,
-                hasMotion: input.yawRadians != nil && input.pitchRadians != nil
+                hasMotion: input.yawRadians != nil && input.pitchRadians != nil,
+                normalizedHomography: input.alignment?.normalizedHomography.map { NSNumber(value: $0) },
+                sourcePixelWidth: input.alignment?.sourcePixelWidth ?? 0,
+                sourcePixelHeight: input.alignment?.sourcePixelHeight ?? 0,
+                luminanceGain: input.alignment?.luminanceGain ?? 1
             )
         }
         let outcome: UWStitchOutcome
@@ -107,6 +136,7 @@ public actor StitchingEngine {
                 targetAspectRatio: targetAspectRatio ?? 0,
                 minimumHorizontalFOVDegrees: minimumHorizontalFOVDegrees ?? 0,
                 minimumVerticalFOVDegrees: minimumVerticalFOVDegrees ?? 0,
+                preparedFocalRatio: preparedFocalRatio ?? 0,
                 progress: { fraction in
                     progress(fraction)
                     return !Task<Never, Never>.isCancelled
@@ -120,7 +150,8 @@ public actor StitchingEngine {
             pixelWidth: outcome.pixelWidth,
             pixelHeight: outcome.pixelHeight,
             usedFrameIndices: outcome.usedFrameIndexes.map(\.intValue),
-            rejectedFrameIndices: outcome.rejectedFrameIndexes.map(\.intValue)
+            rejectedFrameIndices: outcome.rejectedFrameIndexes.map(\.intValue),
+            reusedPreparedAlignment: outcome.reusedPreparedAlignment
         )
     }
 }

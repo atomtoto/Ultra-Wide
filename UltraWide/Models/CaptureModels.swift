@@ -253,7 +253,7 @@ enum CaptureStatus: Equatable, Sendable {
     }
 }
 
-enum CaptureError: LocalizedError, Sendable {
+enum CaptureError: LocalizedError, Equatable, Sendable {
     case cameraPermissionDenied
     case cameraUnavailable
     case lensUnavailable
@@ -263,6 +263,7 @@ enum CaptureError: LocalizedError, Sendable {
     case notReady
     case notAligned
     case orientationChanged
+    case excessiveRoll
     case noCurrentSlot
     case incompletePass
     case retakeLimitReached
@@ -282,7 +283,8 @@ enum CaptureError: LocalizedError, Sendable {
         case .motionUnavailable: "Les capteurs de mouvement sont indisponibles."
         case .notReady: "La prise de vue n’est pas prête."
         case .notAligned: "Alignez le repère et immobilisez l’iPhone."
-        case .orientationChanged: "Remettez l’iPhone dans l’orientation du début de session."
+        case .orientationChanged: "Tenez l’iPhone dans l’orientation du cadre affiché."
+        case .excessiveRoll: "Redressez l’iPhone pour garder le cadre droit."
         case .noCurrentSlot: "Aucune vue n’est disponible."
         case .incompletePass: "Balayez un peu plus avant d’arrêter."
         case .retakeLimitReached: "La limite de 60 images est atteinte. Recommencez une prise."

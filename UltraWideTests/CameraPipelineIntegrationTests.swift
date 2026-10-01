@@ -75,8 +75,12 @@ final class CameraPipelineIntegrationTests: XCTestCase {
         _ = try await camera.videoLandscapeAspectRatio()
         try await camera.prepareForSweep()
         let device = try XCTUnwrap(CameraService.device(for: .wide))
-        let limit = max(1.0 / 240.0, device.activeFormat.minExposureDuration.seconds)
-        XCTAssertLessThanOrEqual(device.activeMaxExposureDuration.seconds, limit + 0.000001)
+        XCTAssertTrue(device.exposureMode == .custom || device.exposureMode == .locked)
+        let duration = device.exposureDuration.seconds
+        let iso = device.iso
+        XCTAssertGreaterThanOrEqual(duration, device.activeFormat.minExposureDuration.seconds)
+        XCTAssertLessThanOrEqual(duration, device.activeFormat.maxExposureDuration.seconds)
+        XCTAssertFalse(device.isVideoHDREnabled)
 
         var timings: [Double] = []
         var selectionTimings: [Double] = []
@@ -90,6 +94,10 @@ final class CameraPipelineIntegrationTests: XCTestCase {
             let source = try XCTUnwrap(CGImageSourceCreateWithData(data as CFData, nil))
             XCTAssertEqual(CGImageSourceGetCount(source), 1)
             XCTAssertTrue(selected.quality.sharpness.isFinite)
+            XCTAssertEqual(device.exposureDuration.seconds, duration, accuracy: 0.000001,
+                           "The sweep must not auto-adjust its shutter between selected images.")
+            XCTAssertEqual(device.iso, iso, accuracy: 0.5,
+                           "The sweep must not auto-adjust gain between selected images.")
         }
         let attachment = XCTAttachment(string: zip(selectionTimings, timings).map {
             String(format: "Selection: %.4f s; selection + encoding: %.4f s", $0, $1)

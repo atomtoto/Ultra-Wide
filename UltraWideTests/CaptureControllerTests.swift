@@ -7,6 +7,246 @@ import XCTest
 
 @MainActor
 final class CaptureControllerTests: XCTestCase {
+    func testCenterSelectionWaitsForAppliedExposureWithoutWaitingForEncoding() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let camera = BufferedTestCamera()
+        camera.exposureBlocked = true
+        let motion = TestMotionProvider()
+        let capture = makeCaptureController(camera: camera, motion: motion,
+            store: CaptureSessionStore(rootURL: folder))
+        try await capture.preparePreview(lens: .wide, target: .half)
+        let configuring = expectation(description: "Exposure configuration began")
+        camera.onExposureStarted = { configuring.fulfill() }
+        let writing = expectation(description: "Center selected and encoding began")
+        camera.onEncodeStarted = { writing.fulfill() }
+        let starting = Task { try await capture.beginSweep() }
+        await fulfillment(of: [configuring], timeout: 1)
+        XCTAssertEqual(camera.selectedCount, 0)
+        XCTAssertNil(capture.currentSnapshot)
+        XCTAssertTrue(capture.isCenterAnchoring)
+        camera.unblockExposure()
+        await fulfillment(of: [writing], timeout: 1)
+        XCTAssertEqual(camera.selectedCount, 1)
+        XCTAssertEqual(capture.status, .capturing)
+        // The main actor and motion-driven selection remain available while
+        // the first JPEG is still encoding with the now stable exposure.
+        try await Task.sleep(for: .milliseconds(40))
+        motion.emit(yaw: 12)
+        for _ in 0..<100 {
+            if camera.selectedCount == 2 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(camera.selectedCount, 2)
+        capture.pause()
+        camera.unblockEncoder()
+        try await starting.value
+    }
+
+    func testPauseDuringExposurePreparationCannotSelectAnOldCenter() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let camera = BufferedTestCamera()
+        camera.exposureBlocked = true
+        let capture = makeCaptureController(camera: camera, motion: TestMotionProvider(),
+            store: CaptureSessionStore(rootURL: folder))
+        try await capture.preparePreview(lens: .wide, target: .half)
+        let configuring = expectation(description: "Exposure configuration began")
+        camera.onExposureStarted = { configuring.fulfill() }
+        let starting = Task { try await capture.beginSweep() }
+        await fulfillment(of: [configuring], timeout: 1)
+        capture.pause()
+        camera.unblockExposure()
+        try await starting.value
+        XCTAssertEqual(camera.selectedCount, 0)
+        XCTAssertNil(capture.currentSnapshot)
+        XCTAssertEqual(capture.status, .idle)
+        XCTAssertFalse(capture.isCenterAnchoring)
+    }
+
+    func testColdReviewRebuildsVisualCoverageAndReservesRepairCapacity() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = CaptureSessionStore(rootURL: folder)
+        let plan = try XCTUnwrap(CapturePlan.make(lens: .wide, target: .half,
+            orientation: .portrait, wideHorizontalFOV: 75, lensHorizontalFOV: 75,
+            sourceLandscapeAspectRatio: 16.0 / 9.0))
+        var saved = CaptureSessionSnapshot(sessionID: UUID(), plan: plan, slots: [],
+            currentPass: 1, isPassOpen: false, retakeCount: 0, coverageFraction: 0,
+            createdAt: Date(), updatedAt: Date())
+        try store.create(saved)
+        for index in 0..<60 {
+            let id = UUID()
+            let url = try await store.writePhoto(Data([0xff, 0xd8, 0xff, 0xd9]),
+                id: id, sessionID: saved.sessionID)
+            let yaw = Double(index) * 0.01
+            let frame = CapturedFrame(id: id, slotID: id.uuidString, fileURL: url,
+                pass: 1, capturedAt: Date(), yawDegrees: yaw, pitchDegrees: 0,
+                rollDegrees: 0, sharpnessScore: 100, meanBrightness: 0.5, quality: .good)
+            saved.slots.append(CaptureSlot(id: frame.slotID, row: 1, column: 1,
+                yawDegrees: yaw, pitchDegrees: 0, frame: frame))
+        }
+        try store.save(saved)
+        let anchor = try XCTUnwrap(saved.frames.first)
+        let capture = makeCaptureController(camera: BufferedTestCamera(),
+            motion: TestMotionProvider(), store: store)
+        XCTAssertNil(capture.visualCoverage)
+        let rebuilt = expectation(description: "Saved views are registered before another exposure")
+        let subscription = capture.$visualCoverage.first { $0 != nil }.sink { _ in rebuilt.fulfill() }
+        try await capture.resume()
+        await fulfillment(of: [rebuilt], timeout: 2)
+        subscription.cancel()
+        XCTAssertEqual(capture.status, .reviewing)
+        XCTAssertGreaterThan(try XCTUnwrap(capture.visualCoverage).fraction, 0)
+        XCTAssertNotNil(capture.preparedStitchInputs)
+
+        try await capture.resumeSweep()
+        let repaired = try XCTUnwrap(capture.currentSnapshot)
+        XCTAssertEqual(repaired.frames.count, 56)
+        XCTAssertEqual(repaired.currentPass, 2)
+        XCTAssertTrue(repaired.isPassOpen)
+        XCTAssertTrue(repaired.frames.contains { $0.id == anchor.id })
+        XCTAssertEqual(try store.load().frames.map(\.id), repaired.frames.map(\.id))
+        XCTAssertTrue(repaired.frames.allSatisfy { FileManager.default.fileExists(atPath: $0.fileURL.path) })
+        let retired = saved.frames.filter { old in !repaired.frames.contains { $0.id == old.id } }
+        XCTAssertEqual(retired.count, 4)
+        XCTAssertTrue(retired.allSatisfy { !FileManager.default.fileExists(atPath: $0.fileURL.path) })
+        capture.pause()
+    }
+
+    func testSweepWaitsForFirstMotionSampleAfterPreviewRotation() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let camera = BufferedTestCamera()
+        camera.unblockEncoder()
+        let motion = TestMotionProvider()
+        motion.emitsOnStart = false
+        let capture = makeCaptureController(camera: camera, motion: motion,
+                                        store: CaptureSessionStore(rootURL: folder))
+        try await capture.preparePreview(lens: .wide, target: .half, orientation: .landscapeRight)
+        let sample = Task {
+            try await Task.sleep(for: .milliseconds(40))
+            motion.emit(yaw: 0)
+        }
+        defer { sample.cancel() }
+        try await capture.beginSweep()
+        XCTAssertEqual(capture.status, .capturing)
+        XCTAssertEqual(capture.currentSnapshot?.plan.orientation, .landscapeRight)
+        XCTAssertEqual(capture.completedCount, 1)
+        capture.pause()
+    }
+
+    func testFirstSweepDefinesRollAtShutterInsteadOfPreviewLaunch() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let camera = BufferedTestCamera()
+        camera.unblockEncoder()
+        let motion = TestMotionProvider()
+        let capture = makeCaptureController(camera: camera, motion: motion,
+                                        store: CaptureSessionStore(rootURL: folder))
+        try await capture.preparePreview(lens: .wide, target: .half)
+        motion.emit(yaw: 0, roll: 35)
+        XCTAssertNil(capture.currentSnapshot)
+        XCTAssertFalse(capture.orientationNeedsCorrection)
+        XCTAssertNil(capture.orientationCorrection)
+
+        try await capture.beginSweep()
+        XCTAssertEqual(capture.status, .capturing)
+        XCTAssertEqual(capture.completedCount, 1)
+        // After the first tap, rotating the frame does require correction.
+        motion.emit(yaw: 0, roll: 35)
+        XCTAssertTrue(capture.orientationNeedsCorrection)
+        guard case .excessiveRoll? = capture.orientationCorrection else {
+            return XCTFail("A tilted frame should request leveling, not a starting orientation")
+        }
+        motion.emit(yaw: 0)
+        XCTAssertFalse(capture.orientationNeedsCorrection)
+        capture.pause()
+    }
+
+    func testWrongPortraitLandscapeOrientationStillBlocksFirstSweep() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let motion = TestMotionProvider()
+        let capture = makeCaptureController(camera: BufferedTestCamera(), motion: motion,
+                                        store: CaptureSessionStore(rootURL: folder))
+        try await capture.preparePreview(lens: .wide, target: .half)
+        motion.emit(yaw: 0, orientationValid: false)
+        XCTAssertTrue(capture.orientationNeedsCorrection)
+        do {
+            try await capture.beginSweep()
+            XCTFail("The capture must match the configured camera orientation")
+        } catch CaptureError.orientationChanged { }
+        XCTAssertNil(capture.currentSnapshot)
+        // Reconfiguring a preview clears the old sensor warning, even when
+        // switching to a direct photo that does not use motion guidance.
+        try await capture.preparePreview(lens: .wide, target: .one)
+        XCTAssertFalse(capture.orientationNeedsCorrection)
+        XCTAssertNil(capture.orientationCorrection)
+        capture.pause()
+    }
+
+    func testManualStopWaitsForVisualRegistrationWithoutBlockingCapture() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let camera = BufferedTestCamera()
+        camera.unblockEncoder()
+        let motion = TestMotionProvider()
+        let assembler = GatedSweepAssembler()
+        let capture = CaptureController(camera: camera, motion: motion,
+            store: CaptureSessionStore(rootURL: folder), visualAssembler: assembler)
+        try await capture.preparePreview(lens: .wide, target: .half)
+        try await capture.beginSweep()
+        let selected = expectation(description: "Acquisition continues during registration")
+        camera.onSelected = { selected.fulfill() }
+        try await Task.sleep(for: .milliseconds(40))
+        motion.emit(yaw: 12)
+        await fulfillment(of: [selected], timeout: 1)
+        for _ in 0..<100 {
+            if capture.currentSnapshot?.frames.count == 2 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(capture.currentSnapshot?.frames.count, 2)
+        XCTAssertNil(capture.visualCoverage)
+        XCTAssertTrue(capture.isVerifyingAlignment)
+        let stopping = Task { try await capture.stopSweep() }
+        await Task.yield()
+        XCTAssertEqual(capture.status, .capturing)
+        XCTAssertTrue(capture.isFinishingSweep)
+        await assembler.release()
+        let saved = try await stopping.value
+        XCTAssertEqual(capture.status, .reviewing)
+        XCTAssertEqual(capture.preparedStitchInputs?.count, 2)
+        XCTAssertEqual(saved.coverageFraction, capture.visualCoverage?.fraction)
+        XCTAssertFalse(capture.isVerifyingAlignment)
+        capture.pause()
+    }
+
+    func testDiscardRejectsAnOldVisualUpdate() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let camera = BufferedTestCamera()
+        camera.unblockEncoder()
+        let assembler = GatedSweepAssembler()
+        let capture = CaptureController(camera: camera, motion: TestMotionProvider(),
+            store: CaptureSessionStore(rootURL: folder), visualAssembler: assembler)
+        try await capture.preparePreview(lens: .wide, target: .half)
+        try await capture.beginSweep()
+        for _ in 0..<100 {
+            if await assembler.isPending() { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        capture.discard()
+        await assembler.release()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(capture.status, .idle)
+        XCTAssertNil(capture.visualCoverage)
+        XCTAssertNil(capture.assemblyPreview)
+        XCTAssertNil(capture.preparedStitchInputs)
+        XCTAssertFalse(capture.isVerifyingAlignment)
+        XCTAssertNil(capture.currentSnapshot)
+    }
+
     func testSoftExposureAtNaturalTiltIsCapturedAfterSingleSmallTurn() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -15,7 +255,7 @@ final class CaptureControllerTests: XCTestCase {
         camera.unblockEncoder()
         camera.quality = PhotoQualityResult(sharpness: 12, brightness: 0.5, quality: .soft)
         let motion = TestMotionProvider()
-        let capture = CaptureController(camera: camera, motion: motion, store: store)
+        let capture = makeCaptureController(camera: camera, motion: motion, store: store)
         try await capture.preparePreview(lens: .wide, target: .half)
         try await capture.beginSweep()
         let captured = expectation(description: "Useful soft exposure captured on first movement")
@@ -38,7 +278,7 @@ final class CaptureControllerTests: XCTestCase {
         camera.unblockEncoder()
         camera.quality = PhotoQualityResult(sharpness: 12, brightness: 0.5, quality: .soft)
         let motion = TestMotionProvider()
-        let capture = CaptureController(camera: camera, motion: motion, store: store)
+        let capture = makeCaptureController(camera: camera, motion: motion, store: store)
         try await capture.preparePreview(lens: .wide, target: .half)
         try await capture.beginSweep()
         let finished = expectation(description: "Continuous hand sweep completed")
@@ -78,7 +318,7 @@ final class CaptureControllerTests: XCTestCase {
         let store = CaptureSessionStore(rootURL: folder)
         let camera = BufferedTestCamera()
         let motion = TestMotionProvider()
-        let capture = CaptureController(camera: camera, motion: motion, store: store)
+        let capture = makeCaptureController(camera: camera, motion: motion, store: store)
         // The simulated camera requires no permission prompt on the simulator.
         try await capture.preparePreview(lens: .wide, target: .half)
         let writing = expectation(description: "Center JPEG encoding started")
@@ -124,7 +364,7 @@ final class CaptureControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: folder) }
         let store = CaptureSessionStore(rootURL: folder)
         let camera = BufferedTestCamera()
-        let capture = CaptureController(camera: camera, motion: TestMotionProvider(), store: store)
+        let capture = makeCaptureController(camera: camera, motion: TestMotionProvider(), store: store)
         try await capture.preparePreview(lens: .wide, target: .half)
         let writing = expectation(description: "Center JPEG pending")
         camera.onEncodeStarted = { writing.fulfill() }
@@ -177,7 +417,7 @@ final class CaptureControllerTests: XCTestCase {
         try store.save(saved)
         let camera = BufferedTestCamera()
         let motion = TestMotionProvider()
-        let capture = CaptureController(camera: camera, motion: motion, store: store)
+        let capture = makeCaptureController(camera: camera, motion: motion, store: store)
         try await capture.resume()
         motion.emit(yaw: 0, speed: 0)
         try capture.confirmReferenceAlignment()
@@ -188,7 +428,8 @@ final class CaptureControllerTests: XCTestCase {
         motion.emit(yaw: -29, pitch: -29)
         await fulfillment(of: [writing], timeout: 1)
         XCTAssertEqual(capture.coverage?.fraction, 1)
-        XCTAssertTrue(capture.isFinishingSweep)
+        XCTAssertFalse(capture.isFinishingSweep)
+        XCTAssertFalse(capture.visualCoverage?.isComplete ?? false)
         XCTAssertFalse(try XCTUnwrap(capture.currentSnapshot).isComplete)
         let finished = expectation(description: "Automatic review after saving final image")
         let subscription = capture.$status.first { $0 == .reviewing }.sink { _ in finished.fulfill() }
@@ -209,16 +450,25 @@ private final class BufferedTestCamera: CameraCapturing {
     let supportedLenses: [CaptureLens] = [.wide]
     var onSelected: (() -> Void)?
     var onEncodeStarted: (() -> Void)?
+    var onExposureStarted: (() -> Void)?
+    var exposureBlocked = false
+    private(set) var selectedCount = 0
     var quality = PhotoQualityResult(sharpness: 100, brightness: 0.5, quality: .good)
     private var encoder: CheckedContinuation<Void, Never>?
     private var encoderBlocked = true
+    private var exposure: CheckedContinuation<Void, Never>?
     func fieldOfView(for lens: CaptureLens) -> Double? { 75 }
     func ensurePermission() async throws { }
     func configure(lens: CaptureLens, orientation: CaptureOrientation, zoomFactor: Double) async throws { }
     func videoLandscapeAspectRatio() async throws -> Double { 16.0 / 9.0 }
-    func prepareForSweep() async throws { }
+    func prepareForSweep() async throws {
+        onExposureStarted?()
+        if exposureBlocked { await withCheckedContinuation { exposure = $0 } }
+    }
+    func unblockExposure() { exposureBlocked = false; exposure?.resume(); exposure = nil }
     func pause() { }
     func selectVideoFrame(near motionTimestamp: TimeInterval) async throws -> SelectedVideoFrame {
+        selectedCount += 1
         var buffer: CVPixelBuffer?
         CVPixelBufferCreate(kCFAllocatorDefault, 8, 8, kCVPixelFormatType_32BGRA, nil, &buffer)
         onSelected?()
@@ -244,21 +494,64 @@ private final class TestMotionProvider: CaptureMotionProviding {
     var onReading: ((MotionReading) -> Void)?
     var isActive = false
     var hasReference = false
+    var emitsOnStart = true
     private var latest: MotionReading?
     func start(orientation: CaptureOrientation, resetReference: Bool) throws {
         isActive = true
         hasReference = true
-        emit(yaw: 0)
+        if emitsOnStart { emit(yaw: 0) }
     }
     func recenter() throws -> MotionReading { emit(yaw: 0); return try XCTUnwrap(latest) }
     func reading(near timestamp: TimeInterval) -> MotionReading? { latest }
     func stop() { isActive = false; hasReference = false }
     func suspendSampling() { }
-    func emit(yaw: Double, pitch: Double = 0, roll: Double = 0, speed: Double = 0.8) {
+    func emit(yaw: Double, pitch: Double = 0, roll: Double = 0, speed: Double = 0.8,
+              orientationValid: Bool = true) {
         let pose = MotionReading(yawDegrees: yaw, pitchDegrees: pitch, rollDegrees: roll,
-                                 angularSpeed: speed, orientationMatchesConfiguration: true,
+                                 angularSpeed: speed, orientationMatchesConfiguration: orientationValid,
                                  sampleTimestamp: CACurrentMediaTime())
         latest = pose
         onReading?(pose)
     }
+}
+
+@MainActor
+private func makeCaptureController(camera: (any CameraCapturing)? = nil,
+    motion: (any CaptureMotionProviding)? = nil, store: CaptureSessionStore? = nil) -> CaptureController {
+    CaptureController(camera: camera, motion: motion, store: store, visualAssembler: TestSweepAssembler())
+}
+
+/// Controller tests supply already-verified image footprints independently of
+/// the actual Vision registration tests, which use textured source images.
+private struct TestSweepAssembler: SweepAssembling {
+    func update(sessionID: UUID, plan: CapturePlan, frames: [CapturedFrame]) async throws -> ProgressiveSweepUpdate {
+        let retained = SweepFrameReducer.reduced(frames, plan: plan)
+        let tracker = CoverageTracker(plan: plan)
+        var polygons: [UUID: [CGPoint]] = [:]
+        var alignments: [UUID: StitchAlignment] = [:]
+        for frame in retained {
+            let rect = tracker.footprint(yaw: frame.yawDegrees, pitch: frame.pitchDegrees)
+            let reliable = rect.insetBy(dx: rect.width * 0.07, dy: rect.height * 0.07)
+            polygons[frame.id] = [CGPoint(x: reliable.minX, y: reliable.minY),
+                CGPoint(x: reliable.maxX, y: reliable.minY), CGPoint(x: reliable.maxX, y: reliable.maxY),
+                CGPoint(x: reliable.minX, y: reliable.maxY)]
+            alignments[frame.id] = StitchAlignment(normalizedHomography:
+                [rect.width, 0, rect.minX, 0, rect.height, rect.minY, 0, 0, 1],
+                sourcePixelWidth: 8, sourcePixelHeight: 8)
+        }
+        return ProgressiveSweepUpdate(sessionID: sessionID, frameIDs: Set(frames.map(\.id)),
+            alignments: alignments, polygonsByFrame: polygons, rejectedFrameIDs: [],
+            retainedFrameIDs: Set(retained.map(\.id)), preview: nil)
+    }
+}
+
+private actor GatedSweepAssembler: SweepAssembling {
+    private var gate: CheckedContinuation<Void, Never>?
+    private var blocked = true
+    func update(sessionID: UUID, plan: CapturePlan, frames: [CapturedFrame]) async throws -> ProgressiveSweepUpdate {
+        if blocked { await withCheckedContinuation { gate = $0 } }
+        return try await TestSweepAssembler().update(sessionID: sessionID, plan: plan, frames: frames)
+    }
+    func isPending() -> Bool { gate != nil }
+    func release() { blocked = false; gate?.resume(); gate = nil }
 }

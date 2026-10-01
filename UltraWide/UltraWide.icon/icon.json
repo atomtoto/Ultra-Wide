@@ -109,7 +109,7 @@
           "image-name" : "Ellipse 1.svg",
           "name" : "Ellipse 1",
           "position" : {
-            "scale" : 13,
+            "scale" : 13.2,
             "translation-in-points" : [
               0,
               0
@@ -120,7 +120,7 @@
           "image-name" : "Ellipse 2.svg",
           "name" : "Ellipse 2",
           "position" : {
-            "scale" : 11,
+            "scale" : 10.5,
             "translation-in-points" : [
               0,
               0

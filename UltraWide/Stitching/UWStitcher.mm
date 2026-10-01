@@ -30,12 +30,43 @@ NSString * const UWStitcherRejectedIndexesKey = @"rejectedFrameIndexes";
              pitchRadians:(double)pitchRadians
               rollRadians:(double)rollRadians
                 hasMotion:(BOOL)hasMotion {
+    return [self initWithURL:url yawRadians:yawRadians pitchRadians:pitchRadians
+                rollRadians:rollRadians hasMotion:hasMotion normalizedHomography:nil
+           sourcePixelWidth:0 sourcePixelHeight:0];
+}
+
+- (instancetype)initWithURL:(NSURL *)url
+               yawRadians:(double)yawRadians
+             pitchRadians:(double)pitchRadians
+              rollRadians:(double)rollRadians
+                hasMotion:(BOOL)hasMotion
+     normalizedHomography:(NSArray<NSNumber *> *)normalizedHomography
+         sourcePixelWidth:(NSInteger)sourcePixelWidth
+        sourcePixelHeight:(NSInteger)sourcePixelHeight {
+    return [self initWithURL:url yawRadians:yawRadians pitchRadians:pitchRadians
+                rollRadians:rollRadians hasMotion:hasMotion normalizedHomography:normalizedHomography
+           sourcePixelWidth:sourcePixelWidth sourcePixelHeight:sourcePixelHeight luminanceGain:1];
+}
+
+- (instancetype)initWithURL:(NSURL *)url
+               yawRadians:(double)yawRadians
+             pitchRadians:(double)pitchRadians
+              rollRadians:(double)rollRadians
+                hasMotion:(BOOL)hasMotion
+     normalizedHomography:(NSArray<NSNumber *> *)normalizedHomography
+         sourcePixelWidth:(NSInteger)sourcePixelWidth
+        sourcePixelHeight:(NSInteger)sourcePixelHeight
+            luminanceGain:(double)luminanceGain {
     if ((self = [super init])) {
         _url = [url copy];
         _yawRadians = yawRadians;
         _pitchRadians = pitchRadians;
         _rollRadians = rollRadians;
         _hasMotion = hasMotion;
+        _normalizedHomography = [normalizedHomography copy];
+        _sourcePixelWidth = sourcePixelWidth;
+        _sourcePixelHeight = sourcePixelHeight;
+        _luminanceGain = luminanceGain;
     }
     return self;
 }
@@ -47,6 +78,7 @@ NSString * const UWStitcherRejectedIndexesKey = @"rejectedFrameIndexes";
 @property (nonatomic, readwrite) NSInteger pixelHeight;
 @property (nonatomic, readwrite) NSArray<NSNumber *> *usedFrameIndexes;
 @property (nonatomic, readwrite) NSArray<NSNumber *> *rejectedFrameIndexes;
+@property (nonatomic, readwrite) BOOL reusedPreparedAlignment;
 @end
 @implementation UWStitchOutcome
 @end
@@ -169,6 +201,64 @@ static cv::Rect2f Bounds(const std::array<cv::Point2f, 4> &points) {
     return {minX, minY, maxX - minX, maxY - minY};
 }
 
+static bool PreparedGeometry(
+    UWStitchFrame *frame,
+    const cv::Size &fullSize,
+    NSInteger inputIndex,
+    double targetWidth,
+    double targetHeight,
+    FrameGeometry &result
+) {
+    if (frame.normalizedHomography.count != 9 || fullSize.width < 2 || fullSize.height < 2 ||
+        fullSize.width > 16000 || fullSize.height > 16000 ||
+        frame.sourcePixelWidth != fullSize.width || frame.sourcePixelHeight != fullSize.height) return false;
+    cv::Matx33d H;
+    double magnitude = 0;
+    for (int i = 0; i < 9; ++i) {
+        NSNumber *coefficient = frame.normalizedHomography[i];
+        if (![coefficient isKindOfClass:NSNumber.class]) return false;
+        const double value = coefficient.doubleValue;
+        if (!std::isfinite(value)) return false;
+        H.val[i] = value;
+        magnitude = std::max(magnitude, std::abs(value));
+    }
+    if (magnitude < std::numeric_limits<double>::min()) return false;
+    H *= 1.0 / magnitude; // Homographies are invariant to a common coefficient scale.
+    if (std::abs(cv::determinant(H)) < 1e-12) return false;
+    const std::array<cv::Point2d, 4> source = {
+        cv::Point2d(0, 0), cv::Point2d(1, 0), cv::Point2d(1, 1), cv::Point2d(0, 1)
+    };
+    std::array<cv::Point2f, 4> corners;
+    int denominatorSign = 0;
+    for (size_t i = 0; i < source.size(); ++i) {
+        const cv::Vec3d mapped = H * cv::Vec3d(source[i].x, source[i].y, 1);
+        if (!std::isfinite(mapped[2]) || std::abs(mapped[2]) < 1e-6) return false;
+        const int sign = mapped[2] > 0 ? 1 : -1;
+        if (denominatorSign && denominatorSign != sign) return false; // Horizon crosses the source rectangle.
+        denominatorSign = sign;
+        const double x = mapped[0] / mapped[2], y = mapped[1] / mapped[2];
+        if (!std::isfinite(x) || !std::isfinite(y) || std::abs(x) > 12 || std::abs(y) > 12) return false;
+        corners[i] = cv::Point2f(static_cast<float>((x - 0.5) * targetWidth),
+                                static_cast<float>((y - 0.5) * targetHeight));
+        if (!FinitePoint(corners[i])) return false;
+    }
+    const std::vector<cv::Point2f> polygon(corners.begin(), corners.end());
+    const double area = std::abs(cv::contourArea(polygon));
+    const double targetArea = targetWidth * targetHeight;
+    const cv::Rect2f bounds = Bounds(corners);
+    if (!cv::isContourConvex(polygon) || area < targetArea * 0.0001 || area > targetArea * 100 ||
+        bounds.width < 1 || bounds.height < 1 || bounds.width > 30000 || bounds.height > 30000) return false;
+    result = {inputIndex, corners, bounds};
+    return true;
+}
+
+static double PreparedPixelDensity(const FrameGeometry &frame, const cv::Size &size) {
+    const auto &p = frame.worldCorners;
+    const double width = std::max(cv::norm(p[1] - p[0]), cv::norm(p[2] - p[3]));
+    const double height = std::max(cv::norm(p[3] - p[0]), cv::norm(p[2] - p[1]));
+    return std::min(size.width / width, size.height / height);
+}
+
 static bool FindCoveredRectangle(const cv::Mat &mask, double aspect, cv::Rect &result) {
     cv::Mat integral;
     cv::integral(mask, integral, CV_32S);
@@ -218,7 +308,42 @@ static bool FindCoveredRectangle(const cv::Mat &mask, double aspect, cv::Rect &r
     return true;
 }
 
-static std::vector<std::array<double, 3>> EstimateExposureGains(
+static const std::array<float, 256> &LinearDecodeLUT() {
+    static const std::array<float, 256> values = [] {
+        std::array<float, 256> result;
+        for (int value = 0; value < 256; ++value) {
+            const double encoded = value / 255.0;
+            result[value] = static_cast<float>(encoded <= 0.04045 ? encoded / 12.92
+                : std::pow((encoded + 0.055) / 1.055, 2.4));
+        }
+        return result;
+    }();
+    return values;
+}
+
+static std::array<uint8_t, 256> LinearGainLUT(double gain) {
+    const auto &decoded = LinearDecodeLUT();
+    std::array<uint8_t, 256> result;
+    for (int value = 0; value < 256; ++value) {
+        const double linear = std::clamp(decoded[value] * gain, 0.0, 1.0);
+        const double encoded = linear <= 0.0031308 ? linear * 12.92
+            : 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055;
+        result[value] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(encoded * 255)), 0, 255));
+    }
+    return result;
+}
+
+static cv::Vec3f LinearColor(const cv::Vec3b &color) {
+    const auto &decoded = LinearDecodeLUT();
+    return cv::Vec3f(decoded[color[0]], decoded[color[1]], decoded[color[2]]);
+}
+
+static double LinearLuminance(const cv::Vec3f &bgr) {
+    // Display P3 luminance coefficients; all working buffers use BGR order.
+    return 0.07928691 * bgr[0] + 0.69173852 * bgr[1] + 0.22897456 * bgr[2];
+}
+
+static std::vector<double> EstimateExposureGains(
     const std::vector<FrameGeometry> &geometry,
     const std::vector<cv::Mat> &thumbnails,
     const cv::Rect2f &globalBounds,
@@ -226,9 +351,9 @@ static std::vector<std::array<double, 3>> EstimateExposureGains(
     int previewH,
     double previewScale
 ) {
-    cv::Mat mosaic(previewH, previewW, CV_8UC3, cv::Scalar());
+    cv::Mat mosaic(previewH, previewW, CV_32FC3, cv::Scalar());
     cv::Mat counts(previewH, previewW, CV_8U, cv::Scalar());
-    std::vector<std::array<double, 3>> gains;
+    std::vector<double> gains;
     gains.reserve(geometry.size());
     for (const auto &frame : geometry) {
         const cv::Mat &thumbnail = thumbnails[frame.inputIndex];
@@ -253,49 +378,48 @@ static std::vector<std::array<double, 3>> EstimateExposureGains(
         cv::warpPerspective(sourceMask, mask, transform, cv::Size(previewW, previewH),
                             cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
 
-        std::array<std::vector<double>, 3> ratios;
+        std::vector<double> ratios;
         for (int y = 3; y < previewH - 3; y += 3) {
-            const cv::Vec3b *oldRow = mosaic.ptr<cv::Vec3b>(y);
+            const cv::Vec3f *oldRow = mosaic.ptr<cv::Vec3f>(y);
             const cv::Vec3b *newRow = warped.ptr<cv::Vec3b>(y);
             const uint8_t *countRow = counts.ptr<uint8_t>(y);
             const uint8_t *maskRow = mask.ptr<uint8_t>(y);
             for (int x = 3; x < previewW - 3; x += 3) {
                 if (!countRow[x] || !maskRow[x]) continue;
-                for (int channel = 0; channel < 3; ++channel) {
-                    const int oldValue = oldRow[x][channel];
-                    const int newValue = newRow[x][channel];
-                    if (oldValue > 24 && oldValue < 235 && newValue > 24 && newValue < 235) {
-                        ratios[channel].push_back(static_cast<double>(oldValue) / newValue);
-                    }
-                }
+                const auto &a = oldRow[x];
+                const auto &encoded = newRow[x];
+                if (std::max({a[0], a[1], a[2]}) >= 0.95f ||
+                    std::max({encoded[0], encoded[1], encoded[2]}) >= 250) continue;
+                const double oldY = LinearLuminance(a), newY = LinearLuminance(LinearColor(encoded));
+                if (oldY <= 0.012 || newY <= 0.012) continue;
+                const double ratio = std::log2(oldY / newY);
+                if (std::isfinite(ratio) && std::abs(ratio) <= 3) ratios.push_back(ratio);
             }
         }
-        std::array<double, 3> gain = {1, 1, 1};
-        for (int channel = 0; channel < 3; ++channel) {
-            auto &values = ratios[channel];
-            if (values.size() < 100) continue;
-            auto middle = values.begin() + values.size() / 2;
-            std::nth_element(values.begin(), middle, values.end());
-            gain[channel] = std::clamp(*middle, 0.72, 1.38);
+        double gain = 1;
+        if (ratios.size() >= 100) {
+            auto middle = ratios.begin() + ratios.size() / 2;
+            std::nth_element(ratios.begin(), middle, ratios.end());
+            const double median = *middle;
+            std::vector<double> deviations;
+            deviations.reserve(ratios.size());
+            for (double ratio : ratios) deviations.push_back(std::abs(ratio - median));
+            auto center = deviations.begin() + deviations.size() / 2;
+            std::nth_element(deviations.begin(), center, deviations.end());
+            if (*center < 0.4) gain = std::clamp(std::exp2(median), 0.25, 4.0);
         }
         gains.push_back(gain);
 
         for (int y = 0; y < previewH; ++y) {
-            cv::Vec3b *oldRow = mosaic.ptr<cv::Vec3b>(y);
+            cv::Vec3f *oldRow = mosaic.ptr<cv::Vec3f>(y);
             const cv::Vec3b *newRow = warped.ptr<cv::Vec3b>(y);
             uint8_t *countRow = counts.ptr<uint8_t>(y);
             const uint8_t *maskRow = mask.ptr<uint8_t>(y);
             for (int x = 0; x < previewW; ++x) {
                 if (!maskRow[x]) continue;
                 const int previous = countRow[x];
-                for (int channel = 0; channel < 3; ++channel) {
-                    const int corrected = std::clamp(
-                        static_cast<int>(std::round(newRow[x][channel] * gain[channel])), 0, 255
-                    );
-                    oldRow[x][channel] = static_cast<uint8_t>(
-                        (oldRow[x][channel] * previous + corrected) / (previous + 1)
-                    );
-                }
+                const cv::Vec3f corrected = LinearColor(newRow[x]) * static_cast<float>(gain);
+                oldRow[x] = (oldRow[x] * previous + corrected) * (1.0f / (previous + 1));
                 countRow[x] = static_cast<uint8_t>(std::min(previous + 1, 255));
             }
         }
@@ -313,7 +437,7 @@ struct BlendPlan {
 static BlendPlan BuildBlendPlan(
     const std::vector<FrameGeometry> &geometry,
     const std::vector<cv::Mat> &thumbnails,
-    const std::vector<std::array<double, 3>> &gains,
+    const std::vector<double> &gains,
     const cv::Rect2f &globalBounds
 ) {
     BlendPlan plan;
@@ -329,6 +453,7 @@ static BlendPlan BuildBlendPlan(
     seamMasks.reserve(geometry.size());
 
     for (size_t i = 0; i < geometry.size(); ++i) {
+        const auto colorLUT = LinearGainLUT(gains[i]);
         const auto &frame = geometry[i];
         const cv::Mat &thumbnail = thumbnails[frame.inputIndex];
         const std::array<cv::Point2f, 4> sourceCorners = {
@@ -357,9 +482,7 @@ static BlendPlan BuildBlendPlan(
             for (int x = 0; x < width; ++x) {
                 if (!maskRow[x]) continue;
                 for (int channel = 0; channel < 3; ++channel) {
-                    row[x][channel] = static_cast<uint8_t>(std::clamp(
-                        static_cast<int>(std::round(row[x][channel] * gains[i][channel])), 0, 255
-                    ));
+                    row[x][channel] = colorLUT[row[x][channel]];
                 }
             }
         }
@@ -511,6 +634,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                           targetAspectRatio:(double)targetAspectRatio
                   minimumHorizontalFOVDegrees:(double)minimumHorizontalFOVDegrees
                     minimumVerticalFOVDegrees:(double)minimumVerticalFOVDegrees
+                         preparedFocalRatio:(double)preparedFocalRatio
                                    progress:(BOOL (^)(double))progress
                                       error:(NSError **)error {
 #if TARGET_OS_SIMULATOR
@@ -574,6 +698,54 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             return nil;
         }
 
+        std::vector<int> component;
+        std::vector<FrameGeometry> geometry;
+        geometry.reserve(frameCount);
+        cv::Rect2f globalBounds;
+        double focal = 0;
+        NSMutableArray<NSNumber *> *used = [NSMutableArray arrayWithCapacity:frames.count];
+        NSMutableArray<NSNumber *> *rejected = [NSMutableArray array];
+        int preparedCount = 0;
+        for (UWStitchFrame *frame in frames) if (frame.normalizedHomography != nil) ++preparedCount;
+        const bool reusePrepared = preparedCount >= 2;
+        if (preparedCount || preparedFocalRatio != 0) {
+            if (!reusePrepared || !std::isfinite(preparedFocalRatio) ||
+                preparedFocalRatio < 0.01 || preparedFocalRatio > 100) {
+                if (error) *error = UWError(UWStitcherErrorInvalidGeometry,
+                                            @"The prepared alignment has an invalid calibration.", nil);
+                return nil;
+            }
+        }
+        if (reusePrepared) {
+            stage = "prepared projection";
+            constexpr double targetHeight = 1280;
+            const double targetWidth = targetHeight * aspect;
+            focal = preparedFocalRatio * targetHeight;
+            for (int i = 0; i < frameCount; ++i) {
+                UWStitchFrame *frame = frames[i];
+                if (!frame.normalizedHomography) {
+                    [rejected addObject:@(i)];
+                    continue;
+                }
+                if (!std::isfinite(frame.luminanceGain) || frame.luminanceGain < 0.25 || frame.luminanceGain > 4) {
+                    if (error) *error = UWError(UWStitcherErrorInvalidGeometry,
+                                                @"A prepared image exposure correction is invalid.", @[@(i)]);
+                    return nil;
+                }
+                FrameGeometry prepared;
+                if (!PreparedGeometry(frame, fullSizes[i], i, targetWidth, targetHeight, prepared)) {
+                    if (error) *error = UWError(UWStitcherErrorInvalidGeometry,
+                                                @"A prepared image alignment is invalid or does not match its source.", @[@(i)]);
+                    return nil;
+                }
+                globalBounds = geometry.empty() ? prepared.worldBounds : (globalBounds | prepared.worldBounds);
+                geometry.push_back(prepared);
+                component.push_back(i);
+                [used addObject:@(i)];
+            }
+            NSLog(@"[UltraWide Stitch] reused %zu prepared alignments; registration skipped", geometry.size());
+            if (!Report(progress, 0.35, error)) return nil;
+        } else {
         stage = "registration";
         cv::Ptr<cv::Stitcher> stitcher = cv::Stitcher::create(cv::Stitcher::PANORAMA);
         stitcher->setFeaturesFinder(cv::SIFT::create(1800));
@@ -631,7 +803,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         }
         if (!Report(progress, 0.35, error)) return nil;
 
-        const std::vector<int> component = stitcher->component();
+        component = stitcher->component();
         const std::vector<cv::detail::CameraParams> cameras = stitcher->cameras();
         if (component.size() < 2 || component.size() != cameras.size()) {
             if (error) *error = UWError(UWStitcherErrorInsufficientOverlap,
@@ -646,8 +818,6 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                 return nil;
             }
         }
-        NSMutableArray<NSNumber *> *used = [NSMutableArray arrayWithCapacity:component.size()];
-        NSMutableArray<NSNumber *> *rejected = [NSMutableArray array];
         std::vector<bool> included(frameCount, false);
         for (int index : component) {
             included[index] = true;
@@ -668,7 +838,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         focals.reserve(cameras.size());
         for (const auto &camera : cameras) focals.push_back(camera.focal / workScale);
         std::nth_element(focals.begin(), focals.begin() + focals.size() / 2, focals.end());
-        const double focal = focals[focals.size() / 2];
+        focal = focals[focals.size() / 2];
         if (!std::isfinite(focal) || focal < 100 || focal > 50000) {
             if (error) *error = UWError(UWStitcherErrorInvalidGeometry,
                                         @"Camera calibration produced an invalid focal length.", rejected);
@@ -698,9 +868,6 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         const cv::Mat referenceInverse = referenceRotation.t();
         stage = "projection";
         cv::detail::PlaneWarper warper(static_cast<float>(focal));
-        std::vector<FrameGeometry> geometry;
-        geometry.reserve(component.size());
-        cv::Rect2f globalBounds;
         for (size_t i = 0; i < component.size(); ++i) {
             stage = "projection frame " + std::to_string(i);
             const int inputIndex = component[i];
@@ -742,6 +909,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             geometry.push_back({inputIndex, corners, bounds});
             globalBounds = i == 0 ? bounds : (globalBounds | bounds);
         }
+        } // Legacy sessions estimate their alignment once, at export time.
         stage = "projection coverage";
         if (globalBounds.width <= 0 || globalBounds.height <= 0 ||
             globalBounds.width > 30000 || globalBounds.height > 30000) {
@@ -766,21 +934,39 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         }
         cv::erode(coverage, coverage, cv::Mat(), cv::Point(-1, -1), 2);
         cv::Rect cropPreview;
+        cv::Rect2d cropWorld;
         stage = "projection crop";
-        if (!FindCoveredRectangle(coverage, aspect, cropPreview)) {
+        if (reusePrepared) {
+            constexpr double targetHeight = 1280;
+            const double targetWidth = targetHeight * aspect;
+            cropWorld = cv::Rect2d(-targetWidth * 0.5, -targetHeight * 0.5, targetWidth, targetHeight);
+            const int left = static_cast<int>(std::floor((cropWorld.x - globalBounds.x) * previewScale));
+            const int top = static_cast<int>(std::floor((cropWorld.y - globalBounds.y) * previewScale));
+            const int right = static_cast<int>(std::ceil((cropWorld.br().x - globalBounds.x) * previewScale));
+            const int bottom = static_cast<int>(std::ceil((cropWorld.br().y - globalBounds.y) * previewScale));
+            cropPreview = cv::Rect(left, top, right - left + 1, bottom - top + 1);
+            if (cropPreview.empty() || left < 0 || top < 0 ||
+                cropPreview.br().x > previewW || cropPreview.br().y > previewH ||
+                cv::countNonZero(coverage(cropPreview)) != cropPreview.area()) {
+                if (error) *error = UWError(UWStitcherErrorIncompleteCoverage,
+                                            @"The verified images do not cover the complete requested field.", rejected);
+                return nil;
+            }
+        } else if (!FindCoveredRectangle(coverage, aspect, cropPreview)) {
             NSLog(@"[UltraWide Stitch] no fully covered crop: frames=%d used=%zu rejected=%lu canvas=%dx%d aspect=%.3f",
                   frameCount, component.size(), static_cast<unsigned long>(rejected.count),
                   previewW, previewH, aspect);
             if (error) *error = UWError(UWStitcherErrorIncompleteCoverage,
                                         @"The sweep has gaps inside the requested image.", rejected);
             return nil;
+        } else {
+            cropWorld = cv::Rect2d(
+                globalBounds.x + cropPreview.x / previewScale,
+                globalBounds.y + cropPreview.y / previewScale,
+                cropPreview.width / previewScale,
+                cropPreview.height / previewScale
+            );
         }
-        const cv::Rect2d cropWorld(
-            globalBounds.x + cropPreview.x / previewScale,
-            globalBounds.y + cropPreview.y / previewScale,
-            cropPreview.width / previewScale,
-            cropPreview.height / previewScale
-        );
         const double radiansToDegrees = 180.0 / std::acos(-1.0);
         const double actualHorizontalFOV =
             (std::atan((cropWorld.x + cropWorld.width) / focal) -
@@ -808,7 +994,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         std::vector<double> nativeScales;
         for (size_t i = 0; i < component.size(); ++i) {
             const int index = component[i];
-            nativeScales.push_back(std::min(
+            nativeScales.push_back(reusePrepared ? PreparedPixelDensity(geometry[i], fullSizes[index]) : std::min(
                 static_cast<double>(fullSizes[index].width) / thumbnails[index].cols,
                 static_cast<double>(fullSizes[index].height) / thumbnails[index].rows
             ));
@@ -864,9 +1050,13 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         auto *pixels = static_cast<uint8_t *>(colorFile.bytes);
         auto *weights = static_cast<uint16_t *>(weightFile.bytes);
         stage = "seams and color";
-        const auto exposureGains = EstimateExposureGains(
-            geometry, thumbnails, globalBounds, previewW, previewH, previewScale
-        );
+        std::vector<double> exposureGains;
+        if (reusePrepared) {
+            exposureGains.reserve(geometry.size());
+            for (const auto &frame : geometry) exposureGains.push_back(frames[frame.inputIndex].luminanceGain);
+        } else {
+            exposureGains = EstimateExposureGains(geometry, thumbnails, globalBounds, previewW, previewH, previewScale);
+        }
         if (!Report(progress, 0.46, error)) return nil;
         const BlendPlan blendPlan = BuildBlendPlan(geometry, thumbnails, exposureGains, globalBounds);
         if (!Report(progress, 0.49, error)) return nil;
@@ -892,10 +1082,13 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                 const FrameGeometry &frame = geometry[frameNumber];
                 const int index = static_cast<int>(frame.inputIndex);
                 const cv::Size thumbnailSize = thumbnailSizes[index];
+                const double preparedDecodeScale = reusePrepared
+                    ? std::min(1.0, std::max(scaleX, scaleY) / PreparedPixelDensity(frame, fullSizes[index])) : 0;
                 const int decodeSide = std::min(
                     std::max(fullSizes[index].width, fullSizes[index].height),
-                    static_cast<int>(std::ceil(std::max(thumbnailSize.width, thumbnailSize.height) *
-                                               std::max(scaleX, scaleY) * 1.02))
+                    static_cast<int>(std::ceil((reusePrepared
+                        ? std::max(fullSizes[index].width, fullSizes[index].height) * preparedDecodeScale
+                        : std::max(thumbnailSize.width, thumbnailSize.height) * std::max(scaleX, scaleY)) * 1.02))
                 );
                 cv::Mat source = ReadBGR(frames[index].url, std::max(256, decodeSide));
                 if (source.empty()) {
@@ -928,15 +1121,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                 const double h20 = inverseH.at<double>(2, 0), h21 = inverseH.at<double>(2, 1), h22 = inverseH.at<double>(2, 2);
                 const double featherWidth = std::max(8.0, std::min(source.cols, source.rows) * 0.09);
                 const cv::Mat &seamWeight = blendPlan.seamWeights[frameNumber];
-                std::array<std::array<uint8_t, 256>, 3> colorLUT;
-                for (int channel = 0; channel < 3; ++channel) {
-                    for (int value = 0; value < 256; ++value) {
-                        colorLUT[channel][value] = static_cast<uint8_t>(std::clamp(
-                            static_cast<int>(std::round(value * exposureGains[frameNumber][channel])),
-                            0, 255
-                        ));
-                    }
-                }
+                const auto colorLUT = LinearGainLUT(exposureGains[frameNumber]);
 
                 for (int tileY = top / kTileSide * kTileSide; tileY < bottom; tileY += kTileSide) {
                     for (int tileX = left / kTileSide * kTileSide; tileX < right; tileX += kTileSide) {
@@ -979,12 +1164,12 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                 uint8_t *pixel = pixels + offset * 4;
                                 if (previous == 0) {
                                     for (int channel = 0; channel < 3; ++channel) {
-                                        pixel[channel] = colorLUT[channel][color[channel]];
+                                        pixel[channel] = colorLUT[color[channel]];
                                     }
                                     pixel[3] = 255;
                                 } else {
                                     for (int channel = 0; channel < 3; ++channel) {
-                                        const uint32_t corrected = colorLUT[channel][color[channel]];
+                                        const uint32_t corrected = colorLUT[color[channel]];
                                         pixel[channel] = static_cast<uint8_t>(
                                             (static_cast<uint32_t>(pixel[channel]) * previous +
                                              corrected * contribution + total / 2) / total
@@ -1082,6 +1267,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         outcome.pixelHeight = outputH;
         outcome.usedFrameIndexes = used;
         outcome.rejectedFrameIndexes = rejected;
+        outcome.reusedPreparedAlignment = reusePrepared;
         return outcome;
     } catch (const cv::Exception &exception) {
         if (error) *error = UWError(UWStitcherErrorInvalidGeometry,

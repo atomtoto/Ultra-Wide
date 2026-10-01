@@ -23,6 +23,7 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
     private var photoDimensions = CMVideoDimensions(width: 0, height: 0)
     private var activeZoomFactor = 1.0
     private var pauseRequested = false
+    private var lighting: CaptureLighting = .automatic
 
     static func device(for lens: CaptureLens) -> AVCaptureDevice? {
         let type: AVCaptureDevice.DeviceType = lens == .wide
@@ -74,6 +75,7 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         pauseRequested = false
         activeDevice = nil
         activeZoomFactor = 1
+        lighting = CaptureLighting.saved()
         if session.isRunning { session.stopRunning() }
         // Drain callbacks from the previous configuration before accepting
         // dimensions or images from the new lens.
@@ -132,6 +134,29 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         }
         if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
             device.whiteBalanceMode = .continuousAutoWhiteBalance
+        }
+        // An 8-bit panorama must keep one SDR transfer curve. Automatic EDR
+        // changes can otherwise alter highlights independently between views.
+        device.automaticallyAdjustsVideoHDREnabled = false
+        device.isVideoHDREnabled = false
+        let spaces = device.activeFormat.supportedColorSpaces
+        if spaces.contains(.P3_D65) {
+            device.activeColorSpace = .P3_D65
+        } else if spaces.contains(.sRGB) {
+            device.activeColorSpace = .sRGB
+        }
+        // Whole light cycles between preview frames reduce beat-frequency
+        // pulsing while automatic metering is still active before the tap.
+        let previewRate = lighting.mainsFrequency == 50 ? 25.0 : 30.0
+        if device.activeFormat.isAutoVideoFrameRateSupported {
+            device.isAutoVideoFrameRateEnabled = false
+        }
+        if device.activeFormat.videoSupportedFrameRateRanges.contains(where: {
+            $0.minFrameRate <= previewRate && $0.maxFrameRate >= previewRate
+        }) {
+            let period = CMTime(value: 1, timescale: Int32(previewRate))
+            device.activeVideoMinFrameDuration = period
+            device.activeVideoMaxFrameDuration = period
         }
         let boundedZoom = min(max(CGFloat(zoomFactor), device.minAvailableVideoZoomFactor),
                               device.maxAvailableVideoZoomFactor)
@@ -199,10 +224,10 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         frameCache.clear()
     }
 
-    /// Lock focus and white balance after the center frame is selected. This
-    /// must not hold up the user's tap or a camera interruption.
+    /// Freeze the measured exposure before retaining the first source image.
+    /// Await hardware application, never a stationary pose or JPEG encoding.
     func prepareForSweep() async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        let revision = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int, Error>) in
             sessionQueue.async { [self] in
                 guard session.isRunning, !pauseRequested, let device = activeDevice else {
                     continuation.resume(throwing: CaptureError.cameraUnavailable)
@@ -210,22 +235,87 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
                 }
                 do {
                     try device.lockForConfiguration()
+                    defer { device.unlockForConfiguration() }
                     if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
                     if device.isWhiteBalanceModeSupported(.locked) { device.whiteBalanceMode = .locked }
-                    if device.isExposureModeSupported(.continuousAutoExposure) {
-                        device.activeMaxExposureDuration = CMTimeMaximum(
-                            device.activeFormat.minExposureDuration,
-                            CMTimeMinimum(device.activeFormat.maxExposureDuration,
-                                          CMTime(value: 1, timescale: 240))
-                        )
+                    if device.isExposureModeSupported(.locked) { device.exposureMode = .locked }
+                    let format = device.activeFormat
+                    let setting = SweepExposurePolicy.setting(
+                        meteredDuration: device.exposureDuration.seconds,
+                        meteredISO: Double(device.iso),
+                        minimumDuration: format.minExposureDuration.seconds,
+                        maximumDuration: format.maxExposureDuration.seconds,
+                        minimumISO: Double(format.minISO), maximumISO: Double(format.maxISO),
+                        frameDuration: device.activeVideoMaxFrameDuration.seconds,
+                        mainsFrequency: lighting.mainsFrequency
+                    )
+                    let revision = frameCache.beginExposureChange()
+                    if device.isExposureModeSupported(.custom) {
+                        let deviceClock = session.inputs.flatMap(\.ports).first { $0.mediaType == .video }?.clock
+                        let cache = frameCache
+                        let duration = setting.map {
+                            CMTimeMaximum(format.minExposureDuration, CMTimeMinimum(format.maxExposureDuration,
+                                CMTime(seconds: $0.duration, preferredTimescale: 1_000_000_000)))
+                        } ?? AVCaptureDevice.currentExposureDuration
+                        let iso = setting.map { min(format.maxISO, max(format.minISO, Float($0.iso))) }
+                            ?? AVCaptureDevice.currentISO
+                        device.setExposureModeCustom(duration: duration, iso: iso) { syncTime in
+                            let now = CACurrentMediaTime()
+                            let hostTime = deviceClock.map {
+                                CMSyncConvertTime(syncTime, from: $0, to: CMClockGetHostTimeClock()).seconds
+                            } ?? now
+                            // With no usable device clock, require the next
+                            // delivered frame instead of accepting an old one.
+                            let applied = hostTime.isFinite && abs(hostTime - now) < 0.5 ? hostTime : now
+                            cache.exposureDidApply(at: applied, revision: revision)
+                        }
+                    } else if device.isExposureModeSupported(.locked) {
+                        device.exposureMode = .locked
+                        let frameDelay = device.activeVideoMaxFrameDuration.seconds
+                        frameCache.exposureDidApply(at: CACurrentMediaTime()
+                            + (frameDelay.isFinite && frameDelay > 0 ? frameDelay : 1.0 / 25), revision: revision)
+                    } else {
+                        throw CaptureError.cameraConfigurationFailed
                     }
-                    device.unlockForConfiguration()
-                    continuation.resume()
+                    continuation.resume(returning: revision)
                 } catch {
+                    restorePreviewMeteringOnQueue()
                     continuation.resume(throwing: error)
                 }
             }
         }
+        do {
+            let deadline = CACurrentMediaTime() + 0.6
+            while CACurrentMediaTime() < deadline {
+                try Task.checkCancellation()
+                if frameCache.latest(near: CACurrentMediaTime(), maxAge: 0.20) != nil { return }
+                try await Task.sleep(for: .milliseconds(8))
+            }
+            throw CaptureError.photoDataUnavailable
+        } catch {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                sessionQueue.async { [self] in
+                    if frameCache.exposureRevisionIsCurrent(revision) { restorePreviewMeteringOnQueue() }
+                    continuation.resume()
+                }
+            }
+            throw error
+        }
+    }
+
+    private func restorePreviewMeteringOnQueue() {
+        guard !pauseRequested, let device = activeDevice else { return }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+                device.activeMaxExposureDuration = .invalid
+            }
+            if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+            if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) { device.whiteBalanceMode = .continuousAutoWhiteBalance }
+            frameCache.cancelExposureChange()
+        } catch { /* A later configure retries hardware setup. */ }
     }
 
     /// Select the video buffer before enqueuing JPEG encoding. Its arrival
@@ -478,6 +568,31 @@ private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBuf
     private var receivedAt: TimeInterval = 0
     private var presentationTimestamp: TimeInterval = 0
     private var clock: CMClock?
+    private var exposureGate = ExposureFrameGate()
+
+    func beginExposureChange() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return exposureGate.begin()
+    }
+
+    func exposureDidApply(at timestamp: TimeInterval, revision: Int) {
+        lock.lock()
+        exposureGate.applied(at: timestamp, revision: revision)
+        lock.unlock()
+    }
+
+    func exposureRevisionIsCurrent(_ revision: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return exposureGate.isCurrent(revision)
+    }
+
+    func cancelExposureChange() {
+        lock.lock()
+        exposureGate.reset()
+        lock.unlock()
+    }
 
     func setClock(_ clock: CMClock?) {
         lock.lock()
@@ -492,14 +607,21 @@ private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBuf
     ) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         lock.lock()
-        buffer = pixelBuffer
-        receivedAt = CACurrentMediaTime()
+        let arrival = CACurrentMediaTime()
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let hostTime = clock.map {
             CMSyncConvertTime(presentationTime, from: $0, to: CMClockGetHostTimeClock()).seconds
-        } ?? receivedAt
-        presentationTimestamp = hostTime.isFinite && abs(hostTime - receivedAt) < 0.5
-            ? hostTime : receivedAt
+        } ?? arrival
+        // A delayed or incoherent PTS cannot be relabeled as a fresh exposure
+        // merely because delivery happened after the configuration callback.
+        guard hostTime.isFinite, abs(hostTime - arrival) < 0.5 else {
+            buffer = nil
+            lock.unlock()
+            return
+        }
+        buffer = pixelBuffer
+        receivedAt = arrival
+        presentationTimestamp = hostTime
         lock.unlock()
     }
 
@@ -515,6 +637,7 @@ private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBuf
         defer { lock.unlock() }
         let age = CACurrentMediaTime() - receivedAt
         guard age >= 0, age <= maxAge,
+              exposureGate.accepts(presentationTimestamp),
               abs(presentationTimestamp - timestamp) <= maxAge else { return nil }
         return buffer.map { VideoFrame(pixelBuffer: $0, timestamp: presentationTimestamp) }
     }
@@ -525,6 +648,7 @@ private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBuf
         receivedAt = 0
         presentationTimestamp = 0
         clock = nil
+        exposureGate.reset()
         lock.unlock()
     }
 }

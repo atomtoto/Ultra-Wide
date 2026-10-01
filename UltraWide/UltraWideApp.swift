@@ -21,6 +21,11 @@ struct UltraWideApp: App {
 
     private var liveView: some View {
         UltraWideRootView(model: coordinator.ui)
+            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+                if scenePhase == .active && coordinator.ui.phase == .setup {
+                    coordinator.ui.send(.prepare)
+                }
+            }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     coordinator.ui.send(.prepare)

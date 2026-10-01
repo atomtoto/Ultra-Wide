@@ -19,6 +19,7 @@ final class CaptureUIModel {
     var availableLenses: [CaptureUILens] = [.wide]
     var selectedTarget: CaptureUITarget = .half
     var availableTargets: [CaptureUITarget] = [.half]
+    var selectedLighting: CaptureLighting = .saved()
     var isSinglePhoto = false
     var estimatedPhotos = 9
     var isStarting = false
@@ -60,6 +61,10 @@ final class CaptureUIModel {
             // The new lens may support a different set of target fields.
             availableTargets = []
         case .selectTarget(let target): selectedTarget = target
+        case .selectLighting(let lighting):
+            guard phase == .setup, !hasActiveSession, !isStarting,
+                  selectedLighting != lighting else { return }
+            selectedLighting = lighting
         case .start, .startSweep, .resume, .retry, .confirmReanchor:
             isStarting = true
         case .finishPass:
@@ -130,10 +135,15 @@ struct CaptureUISweep {
     var viewRect: CGRect = CGRect(x: 0.31, y: 0.31, width: 0.38, height: 0.38)
     /// Regions already captured with usable overlap, in the same coordinates.
     var coveredRects: [CGRect] = []
+    /// Footprints whose image alignment has been checked, in 0...1 units.
+    var coveredPolygons: [[CGPoint]] = []
+    /// Progressive image assembled in the desired final field of view.
+    var previewImage: UIImage?
     var coverageFraction: Double = 0
     var isRecording = false
     var isComplete = false
     var isFinishing = false
+    var isVerifyingAlignment = false
 }
 
 struct CaptureUICoverageCell: Identifiable {
@@ -185,6 +195,7 @@ enum CaptureUIAction {
     case prepare
     case selectLens(CaptureUILens)
     case selectTarget(CaptureUITarget)
+    case selectLighting(CaptureLighting)
     case start
     case startSweep
     case stopSweep

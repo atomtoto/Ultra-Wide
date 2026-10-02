@@ -12,6 +12,28 @@
           "image-name" : "Rectangle 3.svg",
           "name" : "Rectangle 3",
           "position" : {
+            "scale" : 15,
+            "translation-in-points" : [
+              667,
+              839
+            ]
+          }
+        },
+        {
+          "image-name" : "Rectangle 3.svg",
+          "name" : "Rectangle 3",
+          "position" : {
+            "scale" : 15,
+            "translation-in-points" : [
+              -470.499789997982,
+              839
+            ]
+          }
+        },
+        {
+          "image-name" : "Rectangle 3.svg",
+          "name" : "Rectangle 3",
+          "position" : {
             "scale" : 20,
             "translation-in-points" : [
               267.1476171344573,

@@ -120,11 +120,17 @@ struct UltraWideRootView: View {
                 }
                 .overlay {
                     LinearGradient(
-                        colors: [.black.opacity(0.54), .clear, .black.opacity(0.66)],
+                        stops: [
+                            .init(color: .black.opacity(0.28), location: 0),
+                            .init(color: .clear, location: 0.18),
+                            .init(color: .clear, location: 0.82),
+                            .init(color: .black.opacity(0.28), location: 1)
+                        ],
                         startPoint: .top,
                         endPoint: .bottom
                     )
                     .ignoresSafeArea()
+                    .allowsHitTesting(false)
                 }
         } else {
             Color.black.ignoresSafeArea()
@@ -156,12 +162,14 @@ struct UltraWideRootView: View {
             if model.phase == .setup && !model.hasActiveSession && showsCameraOptions {
                 cameraOptions.padding(.top, 14)
             }
-            HStack {
-                Spacer(minLength: 0)
-                fieldIndicator(isLandscape: false)
-                    .frame(width: min(176, availableWidth * 0.45))
+            if !model.isSinglePhoto || model.hasActiveSession {
+                HStack {
+                    Spacer(minLength: 0)
+                    compactFieldIndicator(isLandscape: false)
+                        .frame(width: min(128, availableWidth * 0.34))
+                }
+                .padding(.top, 14)
             }
-            .padding(.top, 18)
             Spacer(minLength: 16)
             captureMessages
             shutterControls
@@ -173,8 +181,10 @@ struct UltraWideRootView: View {
         VStack(spacing: 0) {
             captureTopBar
             HStack(alignment: .center, spacing: 20) {
-                fieldIndicator(isLandscape: true)
-                    .frame(width: 240)
+                if !model.isSinglePhoto || model.hasActiveSession {
+                    compactFieldIndicator(isLandscape: true)
+                        .frame(width: 144)
+                }
                 Spacer(minLength: 10)
                 VStack(spacing: 12) {
                     if model.phase == .setup && !model.hasActiveSession && showsCameraOptions {
@@ -348,6 +358,28 @@ struct UltraWideRootView: View {
             }
             .frame(maxWidth: 290)
         }
+    }
+
+    /// Keep the live guide small enough to leave the center of the viewfinder clear.
+    /// The larger map is reserved for inspecting an interrupted sweep.
+    private func compactFieldIndicator(isLandscape: Bool) -> some View {
+        VStack(spacing: 6) {
+            Text(tr("Champ final", "Final frame"))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.8))
+            CoverageMap(sweep: model.sweep, locale: locale)
+                .aspectRatio(isLandscape ? 4.0 / 3.0 : 3.0 / 4.0, contentMode: .fit)
+                .frame(width: isLandscape ? 96 : 72)
+            Text(fieldHint)
+                .font(.caption.weight(.medium))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .modifier(CameraGlassSurface(shape: RoundedRectangle(cornerRadius: 18, style: .continuous)))
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .contain)
     }
 
     private func fieldIndicator(isLandscape: Bool) -> some View {

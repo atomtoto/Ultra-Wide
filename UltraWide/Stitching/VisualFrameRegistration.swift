@@ -56,8 +56,14 @@ struct Homography3x3: Sendable, Equatable {
 /// CGImage is immutable; its retained provider owns its pixel storage.
 struct RegistrationImage: @unchecked Sendable {
     let cgImage: CGImage
+    // A view participates in several registrations and neighbor checks. Keep
+    // its immutable analysis plane instead of redrawing it for every pair.
+    fileprivate let luminance: RegistrationLuminance?
 
-    init(_ cgImage: CGImage) { self.cgImage = cgImage }
+    init(_ cgImage: CGImage) {
+        self.cgImage = cgImage
+        luminance = try? RegistrationLuminance(image: cgImage, maximumSide: 640)
+    }
 }
 
 struct VisualRegistration: Sendable {
@@ -126,10 +132,22 @@ actor VisionFrameRegistration: FrameRegistration {
                                 initialEstimate: Homography3x3?) throws -> VisualRegistration {
         try Task.checkCancellation()
         return try autoreleasepool {
-            let sourceImage = try RegistrationLuminance(image: source.cgImage, maximumSide: 640)
-            let referenceImage = try RegistrationLuminance(image: reference.cgImage, maximumSide: 640)
+            guard let sourceImage = source.luminance, let referenceImage = reference.luminance else {
+                throw VisualRegistrationFailure.unreadableImage
+            }
             guard sourceImage.standardDeviation > 0.012, referenceImage.standardDeviation > 0.012 else {
                 throw VisualRegistrationFailure.insufficientDetail
+            }
+            // A near-perfect seed has already passed the same contour,
+            // overlap and content checks as Vision. Avoid a full homography
+            // search in this common case; retain the verified result on fallback.
+            let seedResult = initialEstimate.map { estimate in
+                Result { try Self.verify(homography: estimate, source: sourceImage, reference: referenceImage) }
+            }
+            let seeded = try? seedResult?.get()
+            try Task.checkCancellation()
+            if let seeded, seeded.contentCorrelation >= 0.985, seeded.visualAgreement >= 0.98 {
+                return seeded
             }
             // Requests require identical dimensions. Each image is resized to
             // the same canvas; the public transform stays normalized, so even
@@ -146,12 +164,12 @@ actor VisionFrameRegistration: FrameRegistration {
             do { try handler.perform([request]) }
             catch {
                 try Task.checkCancellation()
-                guard let initialEstimate else { throw VisualRegistrationFailure.noAlignment }
-                return try Self.verify(homography: initialEstimate, source: sourceImage, reference: referenceImage)
+                guard let seedResult else { throw VisualRegistrationFailure.noAlignment }
+                return try seedResult.get()
             }
             guard let observation = request.results?.first else {
-                guard let initialEstimate else { throw VisualRegistrationFailure.noAlignment }
-                return try Self.verify(homography: initialEstimate, source: sourceImage, reference: referenceImage)
+                guard let seedResult else { throw VisualRegistrationFailure.noAlignment }
+                return try seedResult.get()
             }
             try Task.checkCancellation()
             let matrix = observation.warpTransform
@@ -172,8 +190,7 @@ actor VisionFrameRegistration: FrameRegistration {
                 // motion seed. Repeated residuals accumulate across a sweep.
                 // Compare both against the original images; motion alone is
                 // never enough to select the prior.
-                if let initialEstimate,
-                   let seeded = try? Self.verify(homography: initialEstimate, source: sourceImage, reference: referenceImage),
+                if let seeded,
                    seeded.contentCorrelation * seeded.visualAgreement >
                        refined.contentCorrelation * refined.visualAgreement {
                     return seeded
@@ -182,8 +199,9 @@ actor VisionFrameRegistration: FrameRegistration {
                 return refined
             }
             catch {
-                guard let initialEstimate else { throw error }
-                return try Self.verify(homography: initialEstimate, source: sourceImage, reference: referenceImage)
+                try Task.checkCancellation()
+                guard let seedResult else { throw error }
+                return try seedResult.get()
             }
         }
     }
@@ -214,9 +232,10 @@ actor VisionFrameRegistration: FrameRegistration {
     nonisolated static func verify(
         homography: Homography3x3, source: RegistrationImage, reference: RegistrationImage
     ) throws -> VisualRegistration {
-        try verify(homography: homography,
-                   source: RegistrationLuminance(image: source.cgImage, maximumSide: 640),
-                   reference: RegistrationLuminance(image: reference.cgImage, maximumSide: 640))
+        guard let source = source.luminance, let reference = reference.luminance else {
+            throw VisualRegistrationFailure.unreadableImage
+        }
+        return try verify(homography: homography, source: source, reference: reference)
     }
 
     private nonisolated static func verify(
@@ -239,6 +258,9 @@ actor VisionFrameRegistration: FrameRegistration {
                 let centerY = (Double(gridY) + 0.5) / 12
                 var localSource: [Double] = [], localReference: [Double] = []
                 var referencePoints: [CGPoint] = []
+                localSource.reserveCapacity(49)
+                localReference.reserveCapacity(49)
+                referencePoints.reserveCapacity(49)
                 for y in -halfPatch...halfPatch {
                     for x in -halfPatch...halfPatch {
                         let point = CGPoint(x: centerX + Double(x) / Double(source.width),
@@ -259,21 +281,35 @@ actor VisionFrameRegistration: FrameRegistration {
                 // can correlate well while being several export pixels off.
                 // Compare the zero/one-pixel neighborhood with a small local
                 // search, using the same warped patch and normalized light.
-                var nearby = correlation, best = correlation
-                for dy in -3...3 {
-                    for dx in -3...3 where dx != 0 || dy != 0 {
-                        let offset = CGPoint(x: Double(dx) / Double(reference.width),
-                                             y: Double(dy) / Double(reference.height))
-                        let shifted = referencePoints.compactMap {
-                            reference.sample(CGPoint(x: $0.x + offset.x, y: $0.y + offset.y))
-                        }
-                        guard shifted.count == localSource.count,
-                              let score = Self.correlation(localSource, shifted, minimumDeviation: 0.008) else { continue }
-                        best = max(best, score)
-                        if abs(dx) <= 1 && abs(dy) <= 1 { nearby = max(nearby, score) }
+                func score(dx: Int, dy: Int) -> Double? {
+                    let offset = CGPoint(x: Double(dx) / Double(reference.width),
+                                         y: Double(dy) / Double(reference.height))
+                    let shifted = referencePoints.compactMap {
+                        reference.sample(CGPoint(x: $0.x + offset.x, y: $0.y + offset.y))
+                    }
+                    guard shifted.count == localSource.count else { return nil }
+                    return Self.correlation(localSource, shifted, minimumDeviation: 0.008)
+                }
+                // Correlation cannot exceed 1. Once the nearby score reaches
+                // 0.94, no offset can beat it by the required 0.06. Otherwise
+                // finish the 3x3 neighborhood before searching farther away.
+                var nearby = correlation
+                nearbySearch: for dy in -1...1 {
+                    for dx in -1...1 where dx != 0 || dy != 0 {
+                        if nearby >= 0.94 { break nearbySearch }
+                        if let score = score(dx: dx, dy: dy) { nearby = max(nearby, score) }
                     }
                 }
-                if best >= 0.85 && best > nearby + 0.06 { displaced += 1 }
+                if nearby < 0.94 {
+                    outerSearch: for dy in -3...3 {
+                        for dx in -3...3 where abs(dx) > 1 || abs(dy) > 1 {
+                            if let score = score(dx: dx, dy: dy), score >= 0.85, score > nearby + 0.06 {
+                                displaced += 1
+                                break outerSearch
+                            }
+                        }
+                    }
+                }
             }
         }
         let overlap = Double(overlapping) / Double(tested)
@@ -326,7 +362,7 @@ actor VisionFrameRegistration: FrameRegistration {
     }
 }
 
-private struct RegistrationLuminance {
+fileprivate struct RegistrationLuminance {
     let width: Int
     let height: Int
     let values: [UInt8]

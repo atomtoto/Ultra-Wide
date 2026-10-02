@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <vector>
 #include "UWBlendSampling.hpp"
+#include "UWParallelRender.hpp"
 #endif
 
 #import "UWStitcher.h"
@@ -1083,6 +1084,8 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         }
 
         stage = "full-resolution render";
+        const size_t renderWorkers = std::max<size_t>(1, std::min<size_t>(4,
+            NSProcessInfo.processInfo.activeProcessorCount));
         for (size_t frameNumber = 0; frameNumber < geometry.size(); ++frameNumber) {
             @autoreleasepool {
                 const FrameGeometry &frame = geometry[frameNumber];
@@ -1129,65 +1132,69 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                 const cv::Mat &seamWeight = blendPlan.seamWeights[frameNumber];
                 const auto colorLUT = LinearGainLUT(exposureGains[frameNumber]);
 
-                for (int tileY = top / kTileSide * kTileSide; tileY < bottom; tileY += kTileSide) {
-                    for (int tileX = left / kTileSide * kTileSide; tileX < right; tileX += kTileSide) {
-                        const int tileW = std::min(kTileSide, outputW - tileX);
-                        const int tileH = std::min(kTileSide, outputH - tileY);
-                        cv::Mat tile;
-                        cv::Mat translation = (cv::Mat_<double>(3, 3) <<
-                            1, 0, -tileX,
-                            0, 1, -tileY,
-                            0, 0, 1);
-                        cv::warpPerspective(source, tile, translation * H, cv::Size(tileW, tileH),
-                                            cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
-                        for (int y = std::max(top, tileY); y < std::min(bottom, tileY + tileH); ++y) {
-                            const cv::Vec3b *row = tile.ptr<cv::Vec3b>(y - tileY);
-                            const double seamY = seamStartY + y * seamStepY;
-                            for (int x = std::max(left, tileX); x < std::min(right, tileX + tileW); ++x) {
-                                const double denominator = h20 * x + h21 * y + h22;
-                                if (std::abs(denominator) < 1e-8) continue;
-                                const double sourceX = (h00 * x + h01 * y + h02) / denominator;
-                                const double sourceY = (h10 * x + h11 * y + h12) / denominator;
-                                if (sourceX < 0.5 || sourceY < 0.5 ||
-                                    sourceX >= source.cols - 1.5 || sourceY >= source.rows - 1.5) continue;
-                                const double edge = std::min({sourceX, sourceY,
-                                                              source.cols - 1.0 - sourceX,
-                                                              source.rows - 1.0 - sourceY});
-                                const size_t offset = static_cast<size_t>(y) * outputW + x;
-                                const uint16_t previous = weights[offset];
-                                // Nearest-neighbor enlargement of a tiny seam
-                                // mask creates rectangular steps on straight
-                                // edges. Sample the soft mask continuously in
-                                // both axes at the actual output pixel.
-                                const double softMask = uw::BilinearMaskWeight(seamWeight.ptr<uint8_t>(),
-                                    seamWeight.cols, seamWeight.rows, seamWeight.step, seamColumns[x], seamY);
-                                if (!softMask && previous) continue;
-                                const uint16_t contribution = static_cast<uint16_t>(std::clamp(
-                                    256.0 * edge / featherWidth *
-                                    (softMask ? softMask / 255.0 : 1.0 / 256.0), 1.0, 256.0
-                                ));
-                                const uint16_t total = previous + contribution;
-                                const cv::Vec3b &color = row[x - tileX];
-                                uint8_t *pixel = pixels + offset * 4;
-                                if (previous == 0) {
-                                    for (int channel = 0; channel < 3; ++channel) {
-                                        pixel[channel] = colorLUT[color[channel]];
-                                    }
-                                    pixel[3] = 255;
-                                } else {
-                                    for (int channel = 0; channel < 3; ++channel) {
-                                        const uint32_t corrected = colorLUT[color[channel]];
-                                        pixel[channel] = static_cast<uint8_t>(
-                                            (static_cast<uint32_t>(pixel[channel]) * previous +
-                                             corrected * contribution + total / 2) / total
-                                        );
-                                    }
+                const int firstTileX = left / kTileSide * kTileSide;
+                const int firstTileY = top / kTileSide * kTileSide;
+                const int tileColumns = std::max(0, (right - firstTileX + kTileSide - 1) / kTileSide);
+                const int tileRows = std::max(0, (bottom - firstTileY + kTileSide - 1) / kTileSide);
+                uw::ParallelFor(static_cast<size_t>(tileColumns) * tileRows, renderWorkers, [&](size_t tileIndex) {
+                    const int tileX = firstTileX + static_cast<int>(tileIndex % tileColumns) * kTileSide;
+                    const int tileY = firstTileY + static_cast<int>(tileIndex / tileColumns) * kTileSide;
+                    const int tileW = std::min(kTileSide, outputW - tileX);
+                    const int tileH = std::min(kTileSide, outputH - tileY);
+                    cv::Mat tile;
+                    cv::Mat translation = (cv::Mat_<double>(3, 3) <<
+                        1, 0, -tileX,
+                        0, 1, -tileY,
+                        0, 0, 1);
+                    cv::warpPerspective(source, tile, translation * H, cv::Size(tileW, tileH),
+                                        cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
+                    for (int y = std::max(top, tileY); y < std::min(bottom, tileY + tileH); ++y) {
+                        const cv::Vec3b *row = tile.ptr<cv::Vec3b>(y - tileY);
+                        const double seamY = seamStartY + y * seamStepY;
+                        for (int x = std::max(left, tileX); x < std::min(right, tileX + tileW); ++x) {
+                            const double denominator = h20 * x + h21 * y + h22;
+                            if (std::abs(denominator) < 1e-8) continue;
+                            const double sourceX = (h00 * x + h01 * y + h02) / denominator;
+                            const double sourceY = (h10 * x + h11 * y + h12) / denominator;
+                            if (sourceX < 0.5 || sourceY < 0.5 ||
+                                sourceX >= source.cols - 1.5 || sourceY >= source.rows - 1.5) continue;
+                            const double edge = std::min({sourceX, sourceY,
+                                                          source.cols - 1.0 - sourceX,
+                                                          source.rows - 1.0 - sourceY});
+                            const size_t offset = static_cast<size_t>(y) * outputW + x;
+                            const uint16_t previous = weights[offset];
+                            // Nearest-neighbor enlargement of a tiny seam
+                            // mask creates rectangular steps on straight
+                            // edges. Sample the soft mask continuously in
+                            // both axes at the actual output pixel.
+                            const double softMask = uw::BilinearMaskWeight(seamWeight.ptr<uint8_t>(),
+                                seamWeight.cols, seamWeight.rows, seamWeight.step, seamColumns[x], seamY);
+                            if (!softMask && previous) continue;
+                            const uint16_t contribution = static_cast<uint16_t>(std::clamp(
+                                256.0 * edge / featherWidth *
+                                (softMask ? softMask / 255.0 : 1.0 / 256.0), 1.0, 256.0
+                            ));
+                            const uint16_t total = previous + contribution;
+                            const cv::Vec3b &color = row[x - tileX];
+                            uint8_t *pixel = pixels + offset * 4;
+                            if (previous == 0) {
+                                for (int channel = 0; channel < 3; ++channel) {
+                                    pixel[channel] = colorLUT[color[channel]];
                                 }
-                                weights[offset] = total;
+                                pixel[3] = 255;
+                            } else {
+                                for (int channel = 0; channel < 3; ++channel) {
+                                    const uint32_t corrected = colorLUT[color[channel]];
+                                    pixel[channel] = static_cast<uint8_t>(
+                                        (static_cast<uint32_t>(pixel[channel]) * previous +
+                                         corrected * contribution + total / 2) / total
+                                    );
+                                }
                             }
+                            weights[offset] = total;
                         }
                     }
-                }
+                });
             }
             if (!Report(progress, 0.50 + 0.40 * (frameNumber + 1) / geometry.size(), error)) return nil;
         }

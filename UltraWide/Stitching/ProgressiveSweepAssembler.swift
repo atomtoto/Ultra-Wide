@@ -38,6 +38,11 @@ protocol SweepAssembling: Sendable {
 /// A serial, bounded registration worker. It reads only durable source files,
 /// caches their small thumbnails and transforms, and never owns the camera.
 actor ProgressiveSweepAssembler: SweepAssembling {
+    private struct DecodedView {
+        let image: RegistrationImage
+        let pixelSize: CGSize
+        let photometry: LinearLuminanceImage?
+    }
     private struct View {
         let frame: CapturedFrame
         let image: RegistrationImage
@@ -50,6 +55,7 @@ actor ProgressiveSweepAssembler: SweepAssembling {
     private let registration: any FrameRegistration
     private var sessionID: UUID?
     private var views: [UUID: View] = [:]
+    private var decoded: [UUID: DecodedView] = [:]
     private var rejected: Set<UUID> = []
     private var insufficientDetail: Set<UUID> = []
     private var failedReferences: [UUID: Set<UUID>] = [:]
@@ -68,9 +74,11 @@ actor ProgressiveSweepAssembler: SweepAssembling {
         if self.sessionID != sessionID {
             self.sessionID = sessionID
             views.removeAll(); rejected.removeAll(); failedReferences.removeAll(); insufficientDetail.removeAll()
+            decoded.removeAll()
         }
         let currentIDs = Set(frames.map(\.id))
         views = views.filter { currentIDs.contains($0.key) }
+        decoded = decoded.filter { currentIDs.contains($0.key) }
         rejected.formIntersection(currentIDs)
         insufficientDetail.formIntersection(currentIDs)
         failedReferences = failedReferences.filter { currentIDs.contains($0.key) }
@@ -89,11 +97,16 @@ actor ProgressiveSweepAssembler: SweepAssembling {
             // would retry. Only a changed local neighborhood warrants another
             // expensive registration attempt for a previously rejected view.
             if failedReferences[frame.id] == referenceIDs { continue }
-            guard let (image, size) = Self.read(frame.fileURL) else {
+            if decoded[frame.id] == nil, let (image, size) = Self.read(frame.fileURL) {
+                decoded[frame.id] = DecodedView(image: image, pixelSize: size,
+                                              photometry: LinearLuminanceImage(image.cgImage))
+            }
+            guard let source = decoded[frame.id] else {
                 rejected.insert(frame.id); failedReferences[frame.id] = referenceIDs
                 continue
             }
-            let photometry = LinearLuminanceImage(image.cgImage)
+            let image = source.image, size = source.pixelSize
+            let photometry = source.photometry
             let transform: Homography3x3
             let luminanceGain: Double
             if views.isEmpty {

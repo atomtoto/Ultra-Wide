@@ -69,15 +69,17 @@ final class CaptureSessionStore {
     }
 
     func saveAsync(_ snapshot: CaptureSessionSnapshot) async throws {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(snapshot)
         let url = metadataURL
         let fileIO = fileIO
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             fileIO.queue.async {
                 do {
                     guard fileIO.sessionID == snapshot.sessionID else { throw CaptureError.noSavedSession }
+                    // The manifest grows with the sweep. Serialize it alongside
+                    // the disk write so motion and frame selection stay responsive.
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = [.sortedKeys]
+                    let data = try encoder.encode(snapshot)
                     try data.write(to: url, options: .atomic)
                     continuation.resume()
                 } catch {

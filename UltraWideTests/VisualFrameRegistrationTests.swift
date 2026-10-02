@@ -4,6 +4,15 @@ import XCTest
 @testable import UltraWide
 
 final class VisualFrameRegistrationTests: XCTestCase {
+    func testExactPriorKeepsValidatedGeometryWithoutUnnecessaryRefinement() async throws {
+        let scene = RegistrationImage(try thumbnail(try fixture(), maximumSide: 600))
+        let result = try await VisionFrameRegistration().register(
+            source: scene, reference: scene, initialEstimate: .identity)
+        XCTAssertEqual(result.homography, .identity)
+        XCTAssertGreaterThan(result.contentCorrelation, 0.985)
+        XCTAssertGreaterThan(result.visualAgreement, 0.98)
+    }
+
     func testHomographyCompositionAndInverseUseForwardTopLeftCoordinates() throws {
         let translate = Homography3x3([1, 0, 0.2, 0, 1, -0.1, 0, 0, 1])
         let scale = Homography3x3([2, 0, 0, 0, 0.5, 0, 0, 0, 1])

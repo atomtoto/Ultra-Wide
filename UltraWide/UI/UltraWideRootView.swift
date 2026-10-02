@@ -165,10 +165,11 @@ struct UltraWideRootView: View {
             if !model.isSinglePhoto || model.hasActiveSession {
                 HStack {
                     Spacer(minLength: 0)
-                    compactFieldIndicator(isLandscape: false)
-                        .frame(width: min(128, availableWidth * 0.34))
+                    fieldIndicator(isLandscape: false)
+                        .frame(width: min(176, availableWidth * 0.45))
+                        .allowsHitTesting(false)
                 }
-                .padding(.top, 14)
+                .padding(.top, 18)
             }
             Spacer(minLength: 16)
             captureMessages
@@ -182,8 +183,9 @@ struct UltraWideRootView: View {
             captureTopBar
             HStack(alignment: .center, spacing: 20) {
                 if !model.isSinglePhoto || model.hasActiveSession {
-                    compactFieldIndicator(isLandscape: true)
-                        .frame(width: 144)
+                    fieldIndicator(isLandscape: true)
+                        .frame(width: 240)
+                        .allowsHitTesting(false)
                 }
                 Spacer(minLength: 10)
                 VStack(spacing: 12) {
@@ -358,28 +360,6 @@ struct UltraWideRootView: View {
             }
             .frame(maxWidth: 290)
         }
-    }
-
-    /// Keep the live guide small enough to leave the center of the viewfinder clear.
-    /// The larger map is reserved for inspecting an interrupted sweep.
-    private func compactFieldIndicator(isLandscape: Bool) -> some View {
-        VStack(spacing: 6) {
-            Text(tr("Champ final", "Final frame"))
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.8))
-            CoverageMap(sweep: model.sweep, locale: locale)
-                .aspectRatio(isLandscape ? 4.0 / 3.0 : 3.0 / 4.0, contentMode: .fit)
-                .frame(width: isLandscape ? 96 : 72)
-            Text(fieldHint)
-                .font(.caption.weight(.medium))
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity)
-        .modifier(CameraGlassSurface(shape: RoundedRectangle(cornerRadius: 18, style: .continuous)))
-        .allowsHitTesting(false)
-        .accessibilityElement(children: .contain)
     }
 
     private func fieldIndicator(isLandscape: Bool) -> some View {

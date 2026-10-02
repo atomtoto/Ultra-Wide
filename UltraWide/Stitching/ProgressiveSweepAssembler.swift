@@ -9,20 +9,25 @@ struct ProgressiveSweepUpdate: @unchecked Sendable {
     let alignments: [UUID: StitchAlignment]
     let polygonsByFrame: [UUID: [CGPoint]]
     let rejectedFrameIDs: Set<UUID>
+    let insufficientDetailFrameIDs: Set<UUID>
     let retainedFrameIDs: Set<UUID>
     let preview: CGImage?
     let coverage: VisualSweepCoverage
+    let coverageAnalysis: SweepCoverageAnalysis
 
     init(sessionID: UUID, frameIDs: Set<UUID>, alignments: [UUID: StitchAlignment],
-         polygonsByFrame: [UUID: [CGPoint]], rejectedFrameIDs: Set<UUID>, retainedFrameIDs: Set<UUID>, preview: CGImage?) {
+         polygonsByFrame: [UUID: [CGPoint]], rejectedFrameIDs: Set<UUID>, retainedFrameIDs: Set<UUID>, preview: CGImage?,
+         insufficientDetailFrameIDs: Set<UUID> = []) {
         self.sessionID = sessionID
         self.frameIDs = frameIDs
         self.alignments = alignments
         self.polygonsByFrame = polygonsByFrame
         self.rejectedFrameIDs = rejectedFrameIDs
+        self.insufficientDetailFrameIDs = insufficientDetailFrameIDs
         self.retainedFrameIDs = retainedFrameIDs
         self.preview = preview
         coverage = VisualSweepCoverage(polygons: Array(polygonsByFrame.values))
+        coverageAnalysis = SweepCoverageAnalysis(coverage: coverage)
     }
 }
 
@@ -46,6 +51,7 @@ actor ProgressiveSweepAssembler: SweepAssembling {
     private var sessionID: UUID?
     private var views: [UUID: View] = [:]
     private var rejected: Set<UUID> = []
+    private var insufficientDetail: Set<UUID> = []
     private var failedReferences: [UUID: Set<UUID>] = [:]
     // Display P3 uses the sRGB transfer curve. Apply exposure to linear light,
     // then let Core Image encode the output preview into Display P3.
@@ -61,11 +67,12 @@ actor ProgressiveSweepAssembler: SweepAssembling {
     func update(sessionID: UUID, plan: CapturePlan, frames: [CapturedFrame]) async throws -> ProgressiveSweepUpdate {
         if self.sessionID != sessionID {
             self.sessionID = sessionID
-            views.removeAll(); rejected.removeAll(); failedReferences.removeAll()
+            views.removeAll(); rejected.removeAll(); failedReferences.removeAll(); insufficientDetail.removeAll()
         }
         let currentIDs = Set(frames.map(\.id))
         views = views.filter { currentIDs.contains($0.key) }
         rejected.formIntersection(currentIDs)
+        insufficientDetail.formIntersection(currentIDs)
         failedReferences = failedReferences.filter { currentIDs.contains($0.key) }
         // A later view may bridge an earlier disconnected exposure. Revisit
         // provisional rejects once within this batch after the graph grows.
@@ -98,6 +105,7 @@ actor ProgressiveSweepAssembler: SweepAssembling {
                         < hypot($1.frame.yawDegrees - frame.yawDegrees, $1.frame.pitchDegrees - frame.pitchDegrees)
                 }.prefix(3)
                 var matched: (transform: Homography3x3, gain: Double)?
+                var detailFailures = 0
                 for reference in references {
                     try Task.checkCancellation()
                     do {
@@ -115,9 +123,12 @@ actor ProgressiveSweepAssembler: SweepAssembling {
                         matched = (candidate, gain)
                         break
                     } catch is CancellationError { throw CancellationError() }
+                    catch VisualRegistrationFailure.insufficientDetail { detailFailures += 1; continue }
                     catch { continue }
                 }
                 guard let matched else {
+                    if detailFailures == references.count { insufficientDetail.insert(frame.id) }
+                    else { insufficientDetail.remove(frame.id) }
                     rejected.insert(frame.id); failedReferences[frame.id] = Set(views.keys)
                     continue
                 }
@@ -128,6 +139,7 @@ actor ProgressiveSweepAssembler: SweepAssembling {
             views[frame.id] = View(frame: frame, image: image, transform: transform, pixelSize: size,
                                   polygon: polygon, photometry: photometry, luminanceGain: luminanceGain)
             rejected.remove(frame.id); failedReferences.removeValue(forKey: frame.id)
+            insufficientDetail.remove(frame.id)
         }
         }
         try Task.checkCancellation()
@@ -142,7 +154,7 @@ actor ProgressiveSweepAssembler: SweepAssembling {
             }),
             polygonsByFrame: Dictionary(uniqueKeysWithValues: alignedViews.map { ($0.frame.id, $0.polygon) }),
             rejectedFrameIDs: rejected, retainedFrameIDs: retained,
-            preview: render(alignedViews, plan: plan)
+            preview: render(alignedViews, plan: plan), insufficientDetailFrameIDs: insufficientDetail
         )
     }
 

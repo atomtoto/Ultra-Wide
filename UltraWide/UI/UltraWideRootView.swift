@@ -36,6 +36,8 @@ struct UltraWideRootView: View {
     @Environment(\.locale) private var locale
     @State private var showsDiscardConfirmation = false
     @State private var didPrepare = false
+    @State private var showsExposureControl = false
+    @State private var visibleBlockReason: SweepCaptureBlockReason?
 
     var body: some View {
         ZStack {
@@ -74,6 +76,20 @@ struct UltraWideRootView: View {
             guard !didPrepare else { return }
             didPrepare = true
             model.send(.prepare)
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-ui-exposure-preview") { showsExposureControl = true }
+#endif
+        }
+        .task(id: model.sweep.blockReason) {
+            let reason = model.sweep.blockReason
+            if reason == .writing || reason == .awaitingCamera {
+                do { try await Task.sleep(for: .milliseconds(350)) }
+                catch { return }
+            }
+            visibleBlockReason = reason
+        }
+        .onChange(of: model.phase) { _, phase in
+            if phase != .setup { showsExposureControl = false }
         }
     }
 
@@ -81,7 +97,9 @@ struct UltraWideRootView: View {
     private var background: some View {
         if let session = model.previewSession,
            model.phase == .setup || model.phase == .capturing || model.phase == .reanchor || model.phase == .passReview {
-            CameraPreviewView(session: session, rotationAngle: model.previewRotationAngle)
+            CameraPreviewView(session: session, rotationAngle: model.previewRotationAngle,
+                allowsMetering: model.canAdjustCamera && !model.isStarting,
+                onMeteringPoint: { model.send(.setMeteringPoint($0)) })
                 .ignoresSafeArea()
                 .overlay {
                     LinearGradient(
@@ -115,6 +133,9 @@ struct UltraWideRootView: View {
     private func portraitSweepScreen(availableWidth: CGFloat) -> some View {
         VStack(spacing: 0) {
             captureTopBar
+            if showsExposureControl && model.canAdjustCamera {
+                exposureControl.padding(.top, 12)
+            }
             if model.phase == .setup && !model.hasActiveSession && showsCameraOptions {
                 cameraOptions.padding(.top, 14)
             }
@@ -142,6 +163,7 @@ struct UltraWideRootView: View {
                     if model.phase == .setup && !model.hasActiveSession && showsCameraOptions {
                         cameraOptions
                     }
+                    if showsExposureControl && model.canAdjustCamera { exposureControl }
                     Spacer(minLength: 0)
                     captureMessages
                     shutterControls
@@ -172,10 +194,41 @@ struct UltraWideRootView: View {
             }
             Spacer()
             if model.phase == .setup && !model.hasActiveSession {
+                Button {
+                    showsExposureControl.toggle()
+                } label: {
+                    Image(systemName: "plusminus.circle")
+                        .font(.system(size: 20, weight: .medium))
+                        .frame(width: 44, height: 44)
+                        .modifier(CameraGlassSurface(shape: Circle(), isInteractive: !model.isStarting))
+                }
+                .disabled(!model.canAdjustCamera || model.isStarting)
+                .accessibilityLabel(tr("Régler l’exposition", "Adjust exposure"))
                 lightingMenu
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private var exposureControl: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "sun.min")
+                .accessibilityHidden(true)
+            Slider(value: Binding(get: { model.exposureBias },
+                set: { model.send(.setExposureBias($0)) }), in: -2...2, step: 0.1)
+                .accessibilityLabel(tr("Correction d’exposition", "Exposure compensation"))
+            Text(model.exposureBias.formatted(.number.precision(.fractionLength(1)).sign(strategy: .always()).locale(locale)))
+                .font(.caption.monospacedDigit().weight(.medium))
+                .frame(minWidth: 38)
+            Button {
+                model.send(.setExposureBias(0))
+            } label: { Image(systemName: "arrow.counterclockwise").frame(width: 36, height: 36) }
+                .accessibilityLabel(tr("Réinitialiser l’exposition", "Reset exposure"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .modifier(CameraGlassSurface(shape: Capsule()))
+        .disabled(model.isStarting)
     }
 
     private var lightingMenu: some View {
@@ -321,6 +374,13 @@ struct UltraWideRootView: View {
                     : tr("Pointez le centre", "Point at the center")
         }
         if model.sweep.isComplete { return tr("Couverture complète", "Coverage complete") }
+        if model.phase == .passReview {
+            return model.sweep.capturedField != nil ? tr("Champ capturé disponible", "Captured field available")
+                : tr("Cadre à compléter", "Fill the frame")
+        }
+        if model.phase == .capturing, model.sweep.guidanceDirection != nil {
+            return tr("Complétez le cadre", "Fill the frame")
+        }
         if model.sweep.isVerifyingAlignment && model.phase != .capturing {
             return tr("Vérification…", "Checking…")
         }
@@ -340,6 +400,24 @@ struct UltraWideRootView: View {
                 .padding(.vertical, 10)
                 .modifier(CameraGlassSurface(shape: Capsule()))
                 .frame(maxWidth: 350)
+        } else if model.phase == .capturing && !model.sweep.isFinishing {
+            HStack(spacing: 10) {
+                if visibleBlockReason == nil, let vector = model.sweep.guidanceDirection,
+                   hypot(vector.dx, vector.dy) > 0.03 {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 20, weight: .semibold))
+                        .rotationEffect(.radians(atan2(vector.dx, -vector.dy)))
+                        .foregroundStyle(CameraPalette.accent)
+                        .accessibilityHidden(true)
+                }
+                Text(visibleBlockReason.map(blockMessage) ?? directionMessage)
+                    .font(.subheadline.weight(.medium))
+                    .multilineTextAlignment(.center)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
+            .modifier(CameraGlassSurface(shape: Capsule()))
+            .frame(maxWidth: 350)
         } else if model.phase == .setup && model.previewSession == nil
                     && !model.hasActiveSession && !model.isStarting {
             Button(tr("Réactiver l’appareil photo", "Restart camera")) {
@@ -351,6 +429,35 @@ struct UltraWideRootView: View {
             .buttonStyle(.glass)
             .buttonBorderShape(.capsule)
         }
+    }
+
+    private func blockMessage(_ reason: SweepCaptureBlockReason) -> String {
+        switch reason {
+        case .tooFast: tr("Ralentissez légèrement le mouvement", "Move a little more slowly")
+        case .tooDark: tr("Cette zone est trop sombre", "This area is too dark")
+        case .awaitingCamera: tr("En attente d’une image de la caméra…", "Waiting for a camera image…")
+        case .writing: tr("Enregistrement des images…", "Saving images…")
+        case .insufficientDetail: tr("Visez une zone avec plus de détails", "Aim at an area with more detail")
+        case .alignmentFailed: tr("Ces vues ne s’alignent pas. Revenez vers une zone déjà capturée.",
+                                  "These views cannot be aligned. Return toward an area already captured.")
+        }
+    }
+
+    private var directionMessage: String {
+        guard let vector = model.sweep.guidanceDirection, hypot(vector.dx, vector.dy) > 0.03 else {
+            return model.sweep.isVerifyingAlignment ? tr("Vérification des images…", "Checking images…")
+                : tr("Balayez pour compléter le cadre", "Sweep to fill the frame")
+        }
+        if abs(vector.dx) > abs(vector.dy) * 2.4 {
+            return vector.dx > 0 ? tr("Vers la droite", "Move right") : tr("Vers la gauche", "Move left")
+        }
+        if abs(vector.dy) > abs(vector.dx) * 2.4 {
+            return vector.dy > 0 ? tr("Vers le bas", "Move down") : tr("Vers le haut", "Move up")
+        }
+        if vector.dy < 0 {
+            return vector.dx < 0 ? tr("Vers le haut à gauche", "Move up and left") : tr("Vers le haut à droite", "Move up and right")
+        }
+        return vector.dx < 0 ? tr("Vers le bas à gauche", "Move down and left") : tr("Vers le bas à droite", "Move down and right")
     }
 
     private var shutterControls: some View {
@@ -499,7 +606,7 @@ struct UltraWideRootView: View {
 
     private var interruptedActions: some View {
         GlassEffectContainer(spacing: 8) {
-            HStack(spacing: 12) {
+            VStack(spacing: 12) {
                 Button(tr("Continuer", "Continue")) {
                     model.send(.startSweep)
                 }
@@ -514,6 +621,18 @@ struct UltraWideRootView: View {
                     .foregroundStyle(.black)
                     .buttonStyle(.glassProminent)
                     .controlSize(.large)
+                } else if model.sweep.capturedField != nil {
+                    Button(tr("Utiliser le champ capturé", "Use captured field")) {
+                        model.send(.useCapturedField)
+                    }
+                    .foregroundStyle(.black)
+                    .buttonStyle(.glassProminent)
+                    .controlSize(.large)
+                    Text(tr("Un cadre légèrement réduit, sans zones manquantes.",
+                            "A slightly smaller frame, with no missing areas."))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
                 }
             }
         }
@@ -629,7 +748,7 @@ struct UltraWideRootView: View {
     @ViewBuilder
     private var reviewImage: some View {
         if let image = model.resultPreview {
-            ZoomableReviewImage(image: image)
+            ZoomableReviewImage(preview: image, url: model.resultURL, pixelSize: model.resultPixelSize)
                 .accessibilityLabel(tr("Aperçu de l’image assemblée", "Preview of stitched image"))
         } else {
             Image(systemName: "photo")
@@ -645,6 +764,16 @@ struct UltraWideRootView: View {
                 Text("\(Int(size.width)) × \(Int(size.height)) px")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+            }
+            if model.resultWasCropped, let magnification = model.resultMagnification {
+                Text(tr("Champ capturé", "Captured field") + " · "
+                    + magnification.formatted(.number.precision(.fractionLength(2)).locale(locale)) + "×")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if model.saveState == .idle {
+                    Button(tr("Continuer le balayage", "Continue sweeping")) { model.send(.continueAfterCrop) }
+                        .buttonStyle(.glass)
+                }
             }
             if let issue = model.issue {
                 issueNotice(issue)
@@ -833,6 +962,10 @@ private struct CoverageMap: View {
             let lens = Path(roundedRect: mapped(sweep.viewRect, in: bounds), cornerRadius: cornerRadius)
             inside.fill(lens, with: .color(CameraPalette.accent.opacity(sweep.previewImage == nil ? 0.20 : 0.06)))
             context.stroke(lens, with: .color(CameraPalette.accent), lineWidth: 2.6)
+            if !sweep.isRecording, let crop = sweep.capturedField {
+                inside.stroke(Path(roundedRect: mapped(crop, in: bounds), cornerRadius: cornerRadius),
+                    with: .color(.white), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+            }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(locale.captureLanguageIsFrench ? "Couverture du champ final" : "Final field coverage")
@@ -855,68 +988,5 @@ private struct CoverageMap: View {
     private func mapped(_ point: CGPoint, in bounds: CGRect) -> CGPoint {
         CGPoint(x: bounds.minX + point.x * bounds.width,
                 y: bounds.minY + point.y * bounds.height)
-    }
-}
-
-private struct ZoomableReviewImage: View {
-    var image: UIImage
-    @State private var scale: CGFloat = 1
-    @State private var lastScale: CGFloat = 1
-    @State private var offset: CGSize = .zero
-    @State private var lastOffset: CGSize = .zero
-
-    var body: some View {
-        GeometryReader { geometry in
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .scaleEffect(scale)
-                .offset(offset)
-                .gesture(
-                    MagnifyGesture()
-                        .onChanged { value in
-                            scale = min(max(lastScale * value.magnification, 1), 5)
-                            offset = clamped(offset, in: geometry.size)
-                        }
-                        .onEnded { _ in
-                            lastScale = scale
-                            lastOffset = offset
-                        }
-                )
-                .simultaneousGesture(
-                    DragGesture(minimumDistance: 2)
-                        .onChanged { value in
-                            guard scale > 1 else { return }
-                            offset = clamped(
-                                CGSize(width: lastOffset.width + value.translation.width,
-                                       height: lastOffset.height + value.translation.height),
-                                in: geometry.size
-                            )
-                        }
-                        .onEnded { _ in
-                            lastOffset = offset
-                        }
-                )
-                .onTapGesture(count: 2) {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        scale = scale > 1 ? 1 : 2
-                        lastScale = scale
-                        offset = .zero
-                        lastOffset = .zero
-                    }
-                }
-                .clipped()
-        }
-    }
-
-    private func clamped(_ value: CGSize, in container: CGSize) -> CGSize {
-        guard image.size.width > 0, image.size.height > 0 else { return .zero }
-        let fit = min(container.width / image.size.width,
-                      container.height / image.size.height)
-        let xLimit = max(0, (image.size.width * fit * scale - container.width) / 2)
-        let yLimit = max(0, (image.size.height * fit * scale - container.height) / 2)
-        return CGSize(width: min(max(value.width, -xLimit), xLimit),
-                      height: min(max(value.height, -yLimit), yLimit))
     }
 }

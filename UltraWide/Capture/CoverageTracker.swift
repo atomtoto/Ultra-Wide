@@ -86,7 +86,7 @@ struct CoverageTracker {
         return Double(min(1, max(0, area / target.width / target.height)))
     }
 
-    var isComplete: Bool { imageRects.count >= 2 && fraction >= 0.999999 }
+    var isComplete: Bool { imageRects.count >= 2 && fraction >= CaptureCoverage.completionThreshold }
 
     func shouldKeep(yaw: Double, pitch: Double, repairMode: Bool = false) -> Bool {
         guard abs(yaw) + plan.sourceHorizontalFOV / 2 < 86,

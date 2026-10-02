@@ -23,6 +23,8 @@ final class CaptureUIModel {
     var isSinglePhoto = false
     var estimatedPhotos = 9
     var isStarting = false
+    var canAdjustCamera = false
+    var exposureBias: Double = 0
 
     var currentPass = 1
     var capturedPhotos = 0
@@ -44,6 +46,8 @@ final class CaptureUIModel {
     var resultPreview: UIImage?
     var resultURL: URL?
     var resultPixelSize: CGSize?
+    var resultWasCropped = false
+    var resultMagnification: Double?
     var saveState: CaptureUISaveState = .idle
 
     var issue: CaptureUIIssue?
@@ -65,6 +69,11 @@ final class CaptureUIModel {
             guard phase == .setup, !hasActiveSession, !isStarting,
                   selectedLighting != lighting else { return }
             selectedLighting = lighting
+        case .setExposureBias(let bias):
+            guard canAdjustCamera, !isStarting, bias.isFinite else { return }
+            exposureBias = min(2, max(-2, bias))
+        case .setMeteringPoint:
+            guard canAdjustCamera, !isStarting else { return }
         case .start, .startSweep, .resume, .retry, .confirmReanchor:
             isStarting = true
         case .finishPass:
@@ -72,7 +81,7 @@ final class CaptureUIModel {
         case .beginRefinementPass:
             canRefine = false
             isStarting = true
-        case .assemble:
+        case .assemble, .useCapturedField:
             phase = .processing
         default: break
         }
@@ -144,6 +153,14 @@ struct CaptureUISweep {
     var isComplete = false
     var isFinishing = false
     var isVerifyingAlignment = false
+    var missingTarget: CGPoint?
+    var guidanceDirection: CGVector?
+    var capturedField: CGRect?
+    var blockReason: SweepCaptureBlockReason?
+}
+
+enum SweepCaptureBlockReason: Equatable, Sendable {
+    case tooFast, tooDark, awaitingCamera, writing, insufficientDetail, alignmentFailed
 }
 
 struct CaptureUICoverageCell: Identifiable {
@@ -196,6 +213,8 @@ enum CaptureUIAction {
     case selectLens(CaptureUILens)
     case selectTarget(CaptureUITarget)
     case selectLighting(CaptureLighting)
+    case setMeteringPoint(CGPoint)
+    case setExposureBias(Double)
     case start
     case startSweep
     case stopSweep
@@ -205,6 +224,8 @@ enum CaptureUIAction {
     case finishPass
     case beginRefinementPass
     case assemble
+    case useCapturedField
+    case continueAfterCrop
     case retake(String)
     case pause
     case discard

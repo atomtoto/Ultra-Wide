@@ -24,6 +24,7 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
     private var activeZoomFactor = 1.0
     private var pauseRequested = false
     private var lighting: CaptureLighting = .automatic
+    private var sweepSettingsLocked = false
 
     static func device(for lens: CaptureLens) -> AVCaptureDevice? {
         let type: AVCaptureDevice.DeviceType = lens == .wide
@@ -75,6 +76,7 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         pauseRequested = false
         activeDevice = nil
         activeZoomFactor = 1
+        sweepSettingsLocked = false
         lighting = CaptureLighting.saved()
         if session.isRunning { session.stopRunning() }
         // Drain callbacks from the previous configuration before accepting
@@ -125,6 +127,9 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         session.commitConfiguration()
 
         try device.lockForConfiguration()
+        if device.isFocusPointOfInterestSupported { device.focusPointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+        if device.isExposurePointOfInterestSupported { device.exposurePointOfInterest = CGPoint(x: 0.5, y: 0.5) }
+        device.setExposureTargetBias(0, completionHandler: nil)
         if device.isFocusModeSupported(.continuousAutoFocus) {
             device.focusMode = .continuousAutoFocus
         }
@@ -185,6 +190,50 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         throw CaptureError.cameraUnavailable
     }
 
+    func setMeteringPoint(_ point: CGPoint) async throws {
+        guard point.x.isFinite, point.y.isFinite else { throw CaptureError.notReady }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sessionQueue.async { [self] in
+                guard session.isRunning, !pauseRequested, !sweepSettingsLocked, let device = activeDevice else {
+                    continuation.resume(throwing: CaptureError.notReady)
+                    return
+                }
+                do {
+                    try device.lockForConfiguration()
+                    defer { device.unlockForConfiguration() }
+                    let clamped = CGPoint(x: min(1, max(0, point.x)), y: min(1, max(0, point.y)))
+                    if device.isFocusPointOfInterestSupported {
+                        device.focusPointOfInterest = clamped
+                        if device.isFocusModeSupported(.autoFocus) { device.focusMode = .autoFocus }
+                    }
+                    if device.isExposurePointOfInterestSupported {
+                        device.exposurePointOfInterest = clamped
+                        if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
+                    }
+                    continuation.resume()
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+
+    func setExposureBias(_ value: Float) async throws -> Float {
+        guard value.isFinite else { throw CaptureError.notReady }
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Float, Error>) in
+            sessionQueue.async { [self] in
+                guard session.isRunning, !pauseRequested, !sweepSettingsLocked, let device = activeDevice else {
+                    continuation.resume(throwing: CaptureError.notReady)
+                    return
+                }
+                do {
+                    try device.lockForConfiguration()
+                    defer { device.unlockForConfiguration() }
+                    let bias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, value))
+                    device.setExposureTargetBias(bias) { _ in continuation.resume(returning: bias) }
+                } catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+
     func resume() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sessionQueue.async { [self] in
@@ -236,6 +285,7 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
                 do {
                     try device.lockForConfiguration()
                     defer { device.unlockForConfiguration() }
+                    sweepSettingsLocked = true
                     if device.isFocusModeSupported(.locked) { device.focusMode = .locked }
                     if device.isWhiteBalanceModeSupported(.locked) { device.whiteBalanceMode = .locked }
                     if device.isExposureModeSupported(.locked) { device.exposureMode = .locked }
@@ -308,6 +358,7 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         do {
             try device.lockForConfiguration()
             defer { device.unlockForConfiguration() }
+            sweepSettingsLocked = false
             if device.isExposureModeSupported(.continuousAutoExposure) {
                 device.exposureMode = .continuousAutoExposure
                 device.activeMaxExposureDuration = .invalid

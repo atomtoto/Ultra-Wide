@@ -65,6 +65,24 @@ final class VisualSweepCoverageTests: XCTestCase {
         XCTAssertFalse(coverage.isComplete)
     }
 
+    func testNearlyFullAreaStillRejectsAMissingCorner() {
+        let corner = 0.001
+        let coverage = VisualSweepCoverage(polygons: [
+            [CGPoint(x: -0.025 + corner, y: -0.025), CGPoint(x: 1.025, y: -0.025),
+             CGPoint(x: 1.025, y: 1.025), CGPoint(x: -0.025, y: 1.025),
+             CGPoint(x: -0.025, y: -0.025 + corner)],
+            rectangle(x: 0.2, y: 0.2, width: 0.6, height: 0.6)
+        ])
+
+        XCTAssertGreaterThan(coverage.fraction, 0.999999,
+            "The former area tolerance incorrectly marked this clipped corner as complete.")
+        XCTAssertFalse(coverage.isComplete)
+        let completed = VisualSweepCoverage(polygons: coverage.polygons + [
+            rectangle(x: -0.03, y: -0.03, width: 0.01, height: 0.01)
+        ])
+        XCTAssertTrue(completed.isComplete)
+    }
+
     func testCompleteCoverageRequiresOverscanAndAtLeastTwoViews() {
         let singleView = VisualSweepCoverage(polygons: [
             rectangle(x: -0.1, y: -0.1, width: 1.2, height: 1.2)

@@ -19,6 +19,12 @@ final class UltraWideCoordinator {
     private var orientationBannerActive = false
     private var lastOutputURL: URL?
     private var lastAssemblyPreview: CGImage?
+    private var pendingExposureBias: Double?
+    private var pendingMeteringPoint: CGPoint?
+    private var cameraAdjustmentTask: Task<Void, Never>?
+    private var lastHapticFraction = 0.0
+    private var lastHapticAt = Date.distantPast
+    private let acquisitionFeedback = UISelectionFeedbackGenerator()
 
     init() {
         ui.onAction = { [weak self] action in
@@ -63,6 +69,12 @@ final class UltraWideCoordinator {
             }
             UserDefaults.standard.set(lighting.rawValue, forKey: CaptureLighting.preferenceKey)
             await preparePreview()
+        case .setMeteringPoint(let point):
+            pendingMeteringPoint = point
+            applyCameraAdjustments()
+        case .setExposureBias:
+            pendingExposureBias = ui.exposureBias
+            applyCameraAdjustments()
         case .start, .startSweep:
             await beginOrResumeSweep()
         case .resume:
@@ -90,6 +102,15 @@ final class UltraWideCoordinator {
             await beginOrResumeSweep()
         case .assemble:
             await assemble()
+        case .useCapturedField:
+            guard capture.status == .reviewing, let crop = capture.sweepAnalysis?.capturedField else {
+                ui.phase = .passReview
+                return
+            }
+            await assemble(crop: crop)
+        case .continueAfterCrop:
+            ui.phase = .passReview
+            await beginOrResumeSweep()
         case .capture:
             // Kept for existing accessibility shortcuts; the sweep captures frames itself.
             if capture.currentSnapshot == nil { await beginOrResumeSweep() }
@@ -102,6 +123,9 @@ final class UltraWideCoordinator {
                 showCaptureError(error, fatal: false)
             }
         case .pause:
+            cameraAdjustmentTask?.cancel()
+            pendingExposureBias = nil
+            pendingMeteringPoint = nil
             capture.pause()
             synchronize()
         case .discard, .newCapture:
@@ -119,6 +143,30 @@ final class UltraWideCoordinator {
         case .openSettings:
             guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
             await UIApplication.shared.open(url)
+        }
+    }
+
+    private func applyCameraAdjustments() {
+        guard cameraAdjustmentTask == nil else { return }
+        cameraAdjustmentTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.cameraAdjustmentTask = nil }
+            while self.pendingMeteringPoint != nil || self.pendingExposureBias != nil {
+                let point = self.pendingMeteringPoint
+                let bias = self.pendingExposureBias
+                self.pendingMeteringPoint = nil
+                self.pendingExposureBias = nil
+                guard !Task.isCancelled, self.capture.canAdjustCamera else { return }
+                do {
+                    if let point { try await self.capture.setMeteringPoint(point) }
+                    if let bias { try await self.capture.setExposureBias(Float(bias)) }
+                    guard !Task.isCancelled else { return }
+                    if self.pendingExposureBias == nil { self.ui.exposureBias = Double(self.capture.exposureBias) }
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.showCaptureError(error, fatal: false)
+                }
+            }
         }
     }
 
@@ -142,6 +190,9 @@ final class UltraWideCoordinator {
     private func beginOrResumeSweep() async {
         ui.isStarting = true
         do {
+            // Flush the last slider/focus change before fixing sweep settings.
+            await cameraAdjustmentTask?.value
+            ui.isStarting = true
             if capture.currentSnapshot == nil
                 && (capture.status != .ready || capture.plan?.orientation != currentOrientation()) {
                 let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
@@ -220,7 +271,7 @@ final class UltraWideCoordinator {
         }
     }
 
-    private func assemble() async {
+    private func assemble(crop: CapturedFieldCrop? = nil) async {
         guard !isAssembling else { return }
         guard let snapshot = capture.currentSnapshot, snapshot.frames.count >= 2 else {
             ui.phase = .passReview
@@ -255,16 +306,23 @@ final class UltraWideCoordinator {
         }
         let preparedInputs = capture.preparedStitchInputs
         let usesPreparedAlignment = (preparedInputs?.count ?? 0) >= 2
-        let inputs = usesPreparedAlignment ? (preparedInputs ?? capturedInputs) : capturedInputs
         do {
+            let inputs: [StitchInput]
+            if let crop {
+                guard let preparedInputs else { throw StitchingFailure.invalidGeometry }
+                inputs = try crop.inputs(from: preparedInputs)
+            } else {
+                inputs = usesPreparedAlignment ? (preparedInputs ?? capturedInputs) : capturedInputs
+            }
             let result = try await stitcher.stitch(
                 inputs: inputs,
                 outputURL: outputURL,
                 maximumMegapixels: 16,
                 targetAspectRatio: snapshot.plan.orientation.isPortrait ? 3.0 / 4.0 : 4.0 / 3.0,
-                minimumHorizontalFOVDegrees: snapshot.plan.targetHorizontalFOV,
-                minimumVerticalFOVDegrees: snapshot.plan.targetVerticalFOV,
-                preparedFocalRatio: usesPreparedAlignment ? capture.preparedFocalRatio : nil
+                minimumHorizontalFOVDegrees: crop == nil ? snapshot.plan.targetHorizontalFOV : nil,
+                minimumVerticalFOVDegrees: crop == nil ? snapshot.plan.targetVerticalFOV : nil,
+                preparedFocalRatio: usesPreparedAlignment
+                    ? capture.preparedFocalRatio.map { $0 / (crop?.rect.height ?? 1) } : nil
             ) { [weak self] fraction in
                 Task { @MainActor [weak self] in self?.ui.processingProgress = fraction }
             }
@@ -278,6 +336,8 @@ final class UltraWideCoordinator {
             ui.resultURL = result.imageURL
             ui.resultPreview = preview
             ui.resultPixelSize = CGSize(width: result.pixelWidth, height: result.pixelHeight)
+            ui.resultWasCropped = crop != nil
+            ui.resultMagnification = snapshot.plan.target.magnification / (crop?.rect.width ?? 1)
             ui.saveState = .idle
             ui.processingProgress = nil
             ui.phase = .review
@@ -294,6 +354,9 @@ final class UltraWideCoordinator {
         guard capture.status == .reviewing, let snapshot = capture.currentSnapshot,
               snapshot.frames.count >= 2, !isAssembling,
               ui.phase != .review, ui.phase != .processing else { return }
+        // Stopping an incomplete sweep opens its choices immediately. A
+        // narrower field always requires the photographer's explicit action.
+        guard capture.visualCoverage?.isComplete == true else { return }
         let key = "\(snapshot.sessionID.uuidString):\(snapshot.frames.count)"
         guard automaticAssemblyKey != key else { return }
         automaticAssemblyKey = key
@@ -342,6 +405,8 @@ final class UltraWideCoordinator {
         ui.availableLenses = capture.availableLenses.compactMap { CaptureUILens(rawValue: $0.rawValue) }
         ui.hasActiveSession = capture.currentSnapshot != nil
         ui.hasRecoverableSession = capture.hasRecoverableSession
+        ui.canAdjustCamera = capture.canAdjustCamera
+        if cameraAdjustmentTask == nil { ui.exposureBias = Double(capture.exposureBias) }
         if let plan = capture.plan {
             if capture.currentSnapshot != nil {
                 ui.selectedLens = CaptureUILens(rawValue: plan.lens.rawValue) ?? .wide
@@ -383,6 +448,23 @@ final class UltraWideCoordinator {
         ui.sweep.isVerifyingAlignment = capture.isVerifyingAlignment
         ui.sweep.isRecording = capture.status == .capturing
         ui.sweep.isFinishing = capture.isFinishingSweep || isAssembling || ui.phase == .processing
+        ui.sweep.blockReason = capture.captureBlockReason
+        if let analysis = capture.sweepAnalysis {
+            let center = CGPoint(x: ui.sweep.viewRect.midX, y: ui.sweep.viewRect.midY)
+            ui.sweep.missingTarget = analysis.target(from: center, retaining: ui.sweep.missingTarget)
+            ui.sweep.guidanceDirection = ui.sweep.missingTarget.map { CGVector(dx: $0.x - center.x, dy: $0.y - center.y) }
+            ui.sweep.capturedField = analysis.capturedField?.rect
+        } else {
+            ui.sweep.missingTarget = nil
+            ui.sweep.guidanceDirection = nil
+            ui.sweep.capturedField = nil
+        }
+        if capture.status == .capturing, ui.sweep.coverageFraction - lastHapticFraction >= 0.02,
+           Date().timeIntervalSince(lastHapticAt) >= 0.4 {
+            acquisitionFeedback.selectionChanged()
+            lastHapticFraction = ui.sweep.coverageFraction
+            lastHapticAt = Date()
+        }
 
         if capture.orientationNeedsCorrection, let correction = capture.orientationCorrection {
             ui.banner = captureErrorMessage(correction)
@@ -479,6 +561,12 @@ final class UltraWideCoordinator {
         ui.resultURL = nil
         ui.resultPreview = nil
         ui.resultPixelSize = nil
+        ui.resultWasCropped = false
+        ui.resultMagnification = nil
+        lastHapticFraction = 0
+        cameraAdjustmentTask?.cancel()
+        pendingExposureBias = nil
+        pendingMeteringPoint = nil
         ui.saveState = .idle
         ui.processingProgress = nil
         ui.issue = nil

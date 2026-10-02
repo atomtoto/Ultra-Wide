@@ -8,6 +8,8 @@ protocol CameraCapturing: AnyObject {
     func ensurePermission() async throws
     func configure(lens: CaptureLens, orientation: CaptureOrientation, zoomFactor: Double) async throws
     func videoLandscapeAspectRatio() async throws -> Double
+    func setMeteringPoint(_ point: CGPoint) async throws
+    func setExposureBias(_ value: Float) async throws -> Float
     func prepareForSweep() async throws
     func selectVideoFrame(near motionTimestamp: TimeInterval) async throws -> SelectedVideoFrame
     func encodeSelectedFrame(_ selected: SelectedVideoFrame) async throws -> Data

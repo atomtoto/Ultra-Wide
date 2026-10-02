@@ -17,7 +17,7 @@ struct VisualSweepCoverage: Sendable, Equatable {
         fraction = min(1, max(0, Self.unionArea(clipped) / Double(target.width * target.height)))
         // Exact polygon union includes roll and perspective. A tiny numerical
         // tolerance avoids floating point noise without accepting missing edges.
-        isComplete = self.polygons.count >= 2 && fraction >= 0.999999
+        isComplete = self.polygons.count >= 2 && fraction >= CaptureCoverage.completionThreshold
     }
 
     static func footprint(_ homography: Homography3x3) -> [CGPoint]? {
@@ -30,6 +30,47 @@ struct VisualSweepCoverage: Sendable, Equatable {
         guard denominators.allSatisfy({ $0 > 1e-8 }) || denominators.allSatisfy({ $0 < -1e-8 }) else { return nil }
         let projected = corners.compactMap { homography.transform($0) }
         return projected.count == 4 && valid(projected) ? projected : nil
+    }
+
+    func contains(_ rect: CGRect) -> Bool {
+        guard rect.width > 0, rect.height > 0 else { return false }
+        let clipped = polygons.map { Self.clip($0, to: rect) }.filter { $0.count >= 3 }
+        return Self.unionArea(clipped) / Double(rect.width * rect.height) >= CaptureCoverage.completionThreshold
+    }
+
+    /// Exact fallback for small holes or missing overscan that fall between
+    /// guidance grid samples. Each subtraction leaves convex uncovered pieces.
+    func uncoveredPoints() -> [CGPoint] {
+        let o = Self.overscan
+        var remaining = [[CGPoint(x: -o, y: -o), CGPoint(x: 1 + o, y: -o),
+                          CGPoint(x: 1 + o, y: 1 + o), CGPoint(x: -o, y: 1 + o)]]
+        for polygon in polygons {
+            let signedArea = polygon.indices.reduce(CGFloat.zero) { sum, index in
+                let a = polygon[index], b = polygon[(index + 1) % polygon.count]
+                return sum + a.x * b.y - b.x * a.y
+            }
+            let direction: CGFloat = signedArea >= 0 ? 1 : -1
+            var next: [[CGPoint]] = []
+            for region in remaining {
+                if Self.overlap(region, polygon) < 1e-12 { next.append(region); continue }
+                var inside = region
+                for index in polygon.indices {
+                    let a = polygon[index], b = polygon[(index + 1) % polygon.count]
+                    func distance(_ p: CGPoint) -> CGFloat {
+                        direction * ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x))
+                    }
+                    let outside = Self.clip(inside) { -distance($0) }
+                    if Self.area(outside) > 1e-11 { next.append(outside) }
+                    inside = Self.clip(inside, distance: distance)
+                    if inside.isEmpty { break }
+                }
+            }
+            remaining = next
+        }
+        return remaining.map { polygon in
+            CGPoint(x: polygon.reduce(0) { $0 + $1.x } / CGFloat(polygon.count),
+                    y: polygon.reduce(0) { $0 + $1.y } / CGFloat(polygon.count))
+        }
     }
 
     static func valid(_ polygon: [CGPoint]) -> Bool {

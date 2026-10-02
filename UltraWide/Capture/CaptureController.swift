@@ -21,7 +21,10 @@ final class CaptureController: ObservableObject {
     @Published private(set) var isCenterAnchoring = false
     @Published private(set) var isFinishingSweep = false
     @Published private(set) var currentPass = 1
+    @Published private(set) var captureBlockReason: SweepCaptureBlockReason?
+    @Published private(set) var exposureBias: Float = 0
 
+    /// Bound durable sources, not the number of exposures in a sweep.
     let maximumFrames = 60
     let maximumRetakes = 60
     private let camera: any CameraCapturing
@@ -52,6 +55,11 @@ final class CaptureController: ObservableObject {
     var previewSession: AVCaptureSession { camera.session }
     var availableLenses: [CaptureLens] { camera.supportedLenses }
     var currentSnapshot: CaptureSessionSnapshot? { snapshot }
+    var canAdjustCamera: Bool { status == .ready && snapshot == nil && !isCenterAnchoring }
+    var sweepAnalysis: SweepCoverageAnalysis? {
+        guard let update = progressiveUpdate, update.coverage == visualCoverage else { return nil }
+        return update.coverageAnalysis
+    }
     var preparedFocalRatio: Double? {
         guard let plan, preparedStitchInputs != nil else { return nil }
         return 1 / (2 * tan(plan.targetVerticalFOV * .pi / 360))
@@ -81,6 +89,9 @@ final class CaptureController: ObservableObject {
     }
     var remainingRetakes: Int { max(0, maximumFrames - completedCount) }
     var completedCount: Int { (snapshot?.frames.count ?? 0) + frameQueue.count }
+    private var hasCaptureCapacity: Bool {
+        completedCount < maximumFrames + SweepFrameQueue.capacity
+    }
     var currentSlot: CaptureSlot? { nil }
 
     private func orientationCorrection(for reading: MotionReading) -> CaptureError? {
@@ -148,6 +159,19 @@ final class CaptureController: ObservableObject {
         }
     }
 
+    func setMeteringPoint(_ point: CGPoint) async throws {
+        guard canAdjustCamera else { throw CaptureError.notReady }
+        try await camera.setMeteringPoint(point)
+    }
+
+    func setExposureBias(_ value: Float) async throws {
+        guard canAdjustCamera else { throw CaptureError.notReady }
+        let generation = lifecycleGeneration
+        let applied = try await camera.setExposureBias(value)
+        guard generation == lifecycleGeneration, canAdjustCamera else { return }
+        exposureBias = applied
+    }
+
     /// A 4:3 still from this physical lens already spans the requested field.
     /// The video sweep is only needed when the target is wider than the lens.
     var singlePhotoCropFactor: Double? {
@@ -193,6 +217,7 @@ final class CaptureController: ObservableObject {
         lifecycleGeneration += 1
         let generation = lifecycleGeneration
         status = .preparing
+        captureBlockReason = nil
         latestReading = nil
         orientationNeedsCorrection = false
         orientationCorrection = nil
@@ -212,6 +237,8 @@ final class CaptureController: ObservableObject {
             }
             try await camera.configure(lens: lens, orientation: orientation,
                                        zoomFactor: desiredZoom)
+            guard generation == lifecycleGeneration else { return }
+            exposureBias = try await camera.setExposureBias(exposureBias)
             guard generation == lifecycleGeneration else { return }
             let aspect = try await camera.videoLandscapeAspectRatio()
             guard generation == lifecycleGeneration else { return }
@@ -259,7 +286,7 @@ final class CaptureController: ObservableObject {
         guard status == .ready, let plan, !isCenterAnchoring, !captureRequested else {
             throw CaptureError.notReady
         }
-        guard completedCount < maximumFrames else { throw CaptureError.retakeLimitReached }
+        guard hasCaptureCapacity else { throw CaptureError.retakeLimitReached }
         isCenterAnchoring = true
         let generation = lifecycleGeneration
         defer {
@@ -329,6 +356,7 @@ final class CaptureController: ObservableObject {
         isFinishingSweep = false
         coverage = tracker?.coverage(viewYaw: 0, viewPitch: 0)
         status = .capturing
+        captureBlockReason = nil
         if let saved = snapshot, !saved.frames.isEmpty { scheduleAlignment(saved) }
         // Select the video buffer while the phone still points at the center.
         // Encoding and saving may finish after the user begins moving.
@@ -415,7 +443,7 @@ final class CaptureController: ObservableObject {
             let repairSnapshot = saved
             let targetCount = maximumFrames - 4
             let reclaimed = try await Task.detached(priority: .userInitiated) {
-                try Self.reclaimRepairCapacity(in: repairSnapshot, targetCount: targetCount,
+                try Self.reclaimCaptureCapacity(in: repairSnapshot, targetCount: targetCount,
                                               polygonsByFrame: polygons)
             }.value
             guard generation == lifecycleGeneration else { return }
@@ -467,7 +495,7 @@ final class CaptureController: ObservableObject {
     @discardableResult
     func captureCurrentView() async throws -> CapturedFrame {
         guard status == .capturing, !captureRequested, !isFinishingSweep, !frameQueue.isFull,
-              completedCount < maximumFrames,
+              hasCaptureCapacity,
               let reading = latestReading, readingIsFresh(reading) else {
             throw CaptureError.notReady
         }
@@ -511,7 +539,7 @@ final class CaptureController: ObservableObject {
     }
 
     func resume() async throws {
-        guard var saved = snapshot else { throw CaptureError.noSavedSession }
+        guard let saved = snapshot else { throw CaptureError.noSavedSession }
         guard status == .paused || status.isFailure else { throw CaptureError.notReady }
         cancelAlignment()
         lifecycleGeneration += 1
@@ -522,17 +550,6 @@ final class CaptureController: ObservableObject {
             try await ensureCameraPermission()
             guard generation == lifecycleGeneration else { return }
             if saved.isPassOpen {
-                // A process can exit after persisting the 60th image but
-                // before the automatic stop has closed the sweep.
-                if saved.frames.count >= maximumFrames {
-                    saved.isPassOpen = false
-                    saved.updatedAt = Date()
-                    try store.save(saved)
-                    snapshot = saved
-                    status = .reviewing
-                    scheduleAlignment(saved)
-                    return
-                }
                 try await camera.configure(lens: saved.plan.lens, orientation: saved.plan.orientation, zoomFactor: 1)
                 guard generation == lifecycleGeneration else { return }
                 referenceYawOffset = 0
@@ -623,9 +640,9 @@ final class CaptureController: ObservableObject {
 
     /// Every accepted image overlaps the existing graph. Removing a vertex
     /// that leaves the graph connected makes space without stranding a seam.
-    private nonisolated static func reclaimRepairCapacity(
+    private nonisolated static func reclaimCaptureCapacity(
         in original: CaptureSessionSnapshot, targetCount: Int,
-        polygonsByFrame: [UUID: [CGPoint]]?
+        polygonsByFrame: [UUID: [CGPoint]]?, protectedIDs: Set<UUID> = []
     ) throws -> (snapshot: CaptureSessionSnapshot, retiredURLs: [URL]) {
         var saved = original
         var retiredURLs: [URL] = []
@@ -643,7 +660,15 @@ final class CaptureController: ObservableObject {
             }
                 ?? CoverageTracker(plan: saved.plan, frames: indexedFrames.map(\.1)).fraction
             var preferred: (slotIndex: Int, fractionLoss: Double, qualityRank: Int)?
-            for (slotIndex, frame) in indexedFrames where frame.id != anchor {
+            let candidates = indexedFrames.filter { $0.1.id != anchor && !protectedIDs.contains($0.1.id) }
+                .sorted {
+                    let leftUnaligned = polygonsByFrame?[$0.1.id] == nil
+                    let rightUnaligned = polygonsByFrame?[$1.1.id] == nil
+                    if leftUnaligned != rightUnaligned { return leftUnaligned }
+                    if ($0.1.quality == .good) != ($1.1.quality == .good) { return $0.1.quality != .good }
+                    return $0.0 < $1.0
+                }
+            for (slotIndex, frame) in candidates {
                 let remaining = indexedFrames.filter { $0.0 != slotIndex }.map(\.1)
                 let candidateTracker = CoverageTracker(plan: saved.plan, frames: remaining)
                 let projected = polygonsByFrame.map { polygons in
@@ -661,6 +686,9 @@ final class CaptureController: ObservableObject {
                         || (option.fractionLoss == preferred!.fractionLoss
                             && option.qualityRank < preferred!.qualityRank) {
                     preferred = option
+                    // A redundant view is the best possible eviction. Avoid
+                    // testing every source while the video writer is active.
+                    if option.fractionLoss <= 1e-10 { break }
                 }
             }
             guard let chosen = preferred,
@@ -735,10 +763,19 @@ final class CaptureController: ObservableObject {
             ? tracker.coverage(viewYaw: reading.yawDegrees, viewPitch: reading.pitchDegrees)
             : tracker.coverage(viewYaw: 0, viewPitch: 0)
         if coverage != displayed { coverage = displayed }
+        if status == .capturing {
+            if wrongOrientation { captureBlockReason = nil }
+            else if reading.angularSpeed >= SweepCapturePolicy.maximumAngularSpeed {
+                captureBlockReason = .tooFast
+            } else if frameQueue.isFull { captureBlockReason = .writing }
+            else if captureBlockReason == .tooFast || captureBlockReason == .writing {
+                captureBlockReason = nil
+            }
+        }
         guard status == .capturing, !captureRequested, !isFinishingSweep,
               !frameQueue.isFull, !wrongOrientation,
               SweepCapturePolicy.allows(reading),
-              completedCount < maximumFrames,
+              hasCaptureCapacity,
               CACurrentMediaTime() - lastAttemptAt >= SweepCapturePolicy.minimumFrameInterval,
               shouldSelect(reading) else { return }
         lastAttemptAt = CACurrentMediaTime()
@@ -770,12 +807,12 @@ final class CaptureController: ObservableObject {
               tracker != nil, readingIsFresh(reading),
               reading.orientationMatchesConfiguration,
               abs(reading.rollDegrees) < SweepCapturePolicy.maximumRollDegrees,
-              completedCount < maximumFrames else { return nil }
+              hasCaptureCapacity else { return nil }
         do {
             let selected = try await camera.selectVideoFrame(near: reading.sampleTimestamp)
             guard generation == lifecycleGeneration, status == .capturing, !isFinishingSweep,
                   snapshot?.sessionID == saved.sessionID,
-                  !frameQueue.isFull, completedCount < maximumFrames else { return nil }
+                  !frameQueue.isFull, hasCaptureCapacity else { return nil }
             consecutiveMissingFrames = 0
             // The tap fixes the first frame at the center. Subsequent frames
             // use the pose at exposure, including during continuous movement.
@@ -789,7 +826,13 @@ final class CaptureController: ObservableObject {
                   abs(pose.rollDegrees) < SweepCapturePolicy.maximumRollDegrees,
                   allowLowQuality || SweepCapturePolicy.allows(pose) else { return nil }
             let quality = selected.quality
-            guard allowLowQuality || SweepCapturePolicy.shouldEncode(quality) else { return nil }
+            guard allowLowQuality || SweepCapturePolicy.shouldEncode(quality) else {
+                captureBlockReason = .tooDark
+                return nil
+            }
+            if captureBlockReason != .insufficientDetail && captureBlockReason != .alignmentFailed {
+                captureBlockReason = nil
+            }
             // The live tracker includes buffers still waiting for the writer.
             guard let tracker = self.tracker, shouldSelect(pose, rateLimited: false) else { return nil }
             let id = UUID()
@@ -823,18 +866,13 @@ final class CaptureController: ObservableObject {
                     repairEdgeFrameCount += 1
                 }
             }
-            if completedCount >= maximumFrames {
-                automaticFinishRequested = true
-                isFinishingSweep = true
-                camera.pause()
-                motion.suspendSampling()
-            }
             return task
         } catch {
             guard generation == lifecycleGeneration else { return nil }
             // A single missing video sample is normal while moving. Persistent
             // storage/configuration errors remain visible and recoverable.
             if case CaptureError.photoDataUnavailable = error {
+                captureBlockReason = .awaitingCamera
                 consecutiveMissingFrames += 1
                 if consecutiveMissingFrames < 10 { return nil }
                 pause()
@@ -885,6 +923,28 @@ final class CaptureController: ObservableObject {
                 retiredURLs = saved.frames.filter { retiredIDs.contains($0.id) && $0.id != frame.id }.map(\.fileURL)
                 saved.slots.removeAll { $0.frame.map { retiredIDs.contains($0.id) && $0.id != frame.id } ?? false }
             }
+            if saved.frames.count > maximumFrames {
+                // Make room as part of the serial writer. Keep the center and
+                // recent views, including this unregistered exposure: they can
+                // bridge a missing region. Retire older redundant/rejected
+                // views first while preserving the registered overlap graph.
+                let original = saved
+                let polygons = progressiveUpdate.flatMap {
+                    $0.sessionID == sessionID ? $0.polygonsByFrame : nil
+                }
+                let protected = Set(saved.frames.suffix(4).map(\.id))
+                let limit = maximumFrames
+                let reclaimed = try await Task.detached(priority: .userInitiated) {
+                    try Self.reclaimCaptureCapacity(in: original, targetCount: limit,
+                        polygonsByFrame: polygons, protectedIDs: protected)
+                }.value
+                guard isCurrent() else {
+                    store.removePhoto(at: url)
+                    return nil
+                }
+                saved = reclaimed.snapshot
+                retiredURLs += reclaimed.retiredURLs
+            }
             // Only durable files enter the manifest and the stitch snapshot.
             saved.coverageFraction = confirmedCoverage(in: saved)?.fraction ?? 0
             saved.updatedAt = Date()
@@ -919,9 +979,21 @@ final class CaptureController: ObservableObject {
         tracker = liveTracker
         coverage = liveTracker.coverage(viewYaw: latestReading?.yawDegrees ?? 0,
                                         viewPitch: latestReading?.pitchDegrees ?? 0)
-        if automaticFinishRequested, frameQueue.count == 0, !finishInProgress {
+        if automaticFinishRequested, frameQueue.count == 0, alignmentTask == nil,
+           !finishInProgress, !isFinishingSweep, visualCoverage?.isComplete == true,
+           let update = progressiveUpdate,
+           saved.frames.allSatisfy({ update.frameIDs.contains($0.id) }) {
+            // Completion is decided only after the writer and the latest
+            // registration have drained. An older full preview cannot stop
+            // acquisition while pending sources are changing its coverage.
+            isFinishingSweep = true
+            camera.pause()
+            motion.suspendSampling()
+            let generation = lifecycleGeneration
             Task { [weak self] in
-                guard let self, self.status == .capturing, !self.finishInProgress else { return }
+                guard let self, generation == self.lifecycleGeneration,
+                      self.automaticFinishRequested, self.status == .capturing,
+                      !self.finishInProgress else { return }
                 do { _ = try await self.stopSweep() }
                 catch {
                     guard self.status == .capturing else { return }
@@ -1023,14 +1095,17 @@ final class CaptureController: ObservableObject {
                         let rejected = update.rejectedFrameIDs
                         self.tracker = CoverageTracker(plan: current.plan,
                             frames: current.frames.filter { !rejected.contains($0.id) } + self.frameQueue.frames)
+                        if self.status == .capturing, let last = current.frames.last,
+                           rejected.contains(last.id), self.frameQueue.count == 0 {
+                            self.captureBlockReason = update.insufficientDetailFrameIDs.contains(last.id)
+                                ? .insufficientDetail : .alignmentFailed
+                        } else if self.captureBlockReason == .insufficientDetail || self.captureBlockReason == .alignmentFailed {
+                            self.captureBlockReason = nil
+                        }
                     }
-                    if self.visualCoverage?.isComplete == true, self.status == .capturing,
-                       !self.isFinishingSweep,
-                       !self.repairMode || (self.repairFrameCount >= 4 && self.repairEdgeFrameCount >= 3) {
-                        self.automaticFinishRequested = true
-                        self.isFinishingSweep = true
-                        self.camera.pause()
-                        self.motion.suspendSampling()
+                    if self.status == .capturing, !self.isFinishingSweep {
+                        self.automaticFinishRequested = self.visualCoverage?.isComplete == true
+                            && (!self.repairMode || (self.repairFrameCount >= 4 && self.repairEdgeFrameCount >= 3))
                     }
                 } catch is CancellationError { return }
                 catch {

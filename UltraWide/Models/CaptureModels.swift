@@ -203,7 +203,7 @@ struct CaptureSessionSnapshot: Codable, Equatable, Sendable {
     var frames: [CapturedFrame] { slots.compactMap(\.frame) }
     var missingSlotIDs: [String] { slots.filter { $0.frame == nil }.map(\.id) }
     var isComplete: Bool {
-        if let coverageFraction { return coverageFraction >= 0.999999 && frames.count >= 2 }
+        if let coverageFraction { return coverageFraction >= CaptureCoverage.completionThreshold && frames.count >= 2 }
         return missingSlotIDs.isEmpty && frames.count >= 2
     }
     var suggestedRefinementSlotIDs: [String] {
@@ -214,6 +214,8 @@ struct CaptureSessionSnapshot: Codable, Equatable, Sendable {
 /// Geometry is relative to the requested result, with (0, 0) at its top left.
 /// Rectangles can slightly extend outside 0...1: that overscan protects edges.
 struct CaptureCoverage: Equatable, Sendable {
+    /// Numerical tolerance only: a small missing corner must remain incomplete.
+    static let completionThreshold = 1 - 1e-10
     let viewRect: CGRect
     let coveredRects: [CGRect]
     let fraction: Double

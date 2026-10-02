@@ -8,6 +8,32 @@ import XCTest
 /// both platforms; running the export checks requires a supported device.
 @MainActor
 final class PreparedStitchIntegrationTests: XCTestCase {
+    func testExplicitSmallerFieldExportsUsingRebasedPreparedMatrices() async throws {
+#if targetEnvironment(simulator)
+        throw XCTSkip("Native OpenCV export is unavailable in the simulator.")
+#else
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let matrix = Homography3x3([1.06, 0, -0.1, 0, 1.2, -0.1, 0, 0, 1])
+        let polygon = try XCTUnwrap(VisualSweepCoverage.footprint(matrix))
+        let coverage = VisualSweepCoverage(polygons: [polygon, polygon])
+        XCTAssertFalse(coverage.isComplete)
+        let crop = try XCTUnwrap(SweepCoverageAnalysis(coverage: coverage).capturedField)
+        let alignment = StitchAlignment(normalizedHomography: matrix.elements,
+            sourcePixelWidth: 960, sourcePixelHeight: 1280)
+        let inputs = try crop.inputs(from: [StitchInput(url: fixture.image, alignment: alignment),
+                                           StitchInput(url: fixture.image, alignment: alignment)])
+        let result = try await StitchingEngine().stitch(inputs: inputs,
+            outputURL: fixture.directory.appendingPathComponent("captured-field.heic"),
+            maximumMegapixels: 2, targetAspectRatio: 0.75, preparedFocalRatio: 1 / crop.rect.height)
+        XCTAssertTrue(result.reusedPreparedAlignment)
+        XCTAssertEqual(result.usedFrameIndices, [0, 1])
+        XCTAssertEqual(Double(result.pixelWidth) / Double(result.pixelHeight), 0.75, accuracy: 0.001)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(result.imageURL as CFURL, nil))
+        XCTAssertNotNil(CGImageSourceCreateImageAtIndex(source, 0, nil))
+#endif
+    }
+
     func testPreparedLuminanceGainIsAppliedInLinearDisplayP3() async throws {
 #if targetEnvironment(simulator)
         throw XCTSkip("Native OpenCV export is unavailable in the simulator.")

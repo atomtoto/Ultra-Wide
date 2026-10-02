@@ -10,7 +10,7 @@ struct UltraWideApp: App {
     var body: some Scene {
         WindowGroup {
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains(where: { ["-ui-sweep-preview", "-ui-crop-preview", "-ui-review-preview", "-ui-camera-preview"].contains($0) }) {
+            if ProcessInfo.processInfo.arguments.contains(where: { ["-ui-sweep-preview", "-ui-crop-preview", "-ui-review-preview", "-ui-camera-preview", "-ui-settings-preview"].contains($0) }) {
                 UltraWideRootView(model: Self.sweepPreviewModel())
             } else {
                 liveView
@@ -67,7 +67,7 @@ struct UltraWideApp: App {
             model.sweep.isRecording = false
             model.sweep.capturedField = SweepCoverageAnalysis(coverage: coverage).capturedField?.rect
         }
-        if args.contains("-ui-camera-preview") {
+        if args.contains("-ui-camera-preview") || args.contains("-ui-settings-preview") {
             model.phase = .setup
             model.hasActiveSession = false
             model.previewSession = AVCaptureSession()

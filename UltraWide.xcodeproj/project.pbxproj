@@ -235,6 +235,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = UltraWide;
+				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "UltraWideAmber UltraWideAurora UltraWideGraphite";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = RVBY9CDKL4;
@@ -272,6 +273,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = UltraWide;
+				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "UltraWideAmber UltraWideAurora UltraWideGraphite";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = RVBY9CDKL4;

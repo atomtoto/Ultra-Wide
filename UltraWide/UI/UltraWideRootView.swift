@@ -1,7 +1,7 @@
 import AVFoundation
 import SwiftUI
 
-private enum CameraPalette {
+enum CameraPalette {
     static let accent = Color(red: 1.0, green: 0.73, blue: 0.16)
 }
 
@@ -34,6 +34,8 @@ private struct CameraGlassSurface<S: Shape>: ViewModifier {
 struct UltraWideRootView: View {
     @Bindable var model: CaptureUIModel
     @Environment(\.locale) private var locale
+    @AppStorage(AppPreferences.gridKey) private var showsGrid = false
+    @State private var showsSettings = false
     @State private var showsDiscardConfirmation = false
     @State private var didPrepare = false
     @State private var showsExposureControl = false
@@ -60,6 +62,11 @@ struct UltraWideRootView: View {
         }
         .tint(CameraPalette.accent)
         .preferredColorScheme(.dark)
+        .sheet(isPresented: $showsSettings) {
+            AppSettingsView(model: model)
+                .tint(CameraPalette.accent)
+                .preferredColorScheme(.dark)
+        }
         .confirmationDialog(
             tr("Supprimer cette prise de vue ?", "Discard this capture?"),
             isPresented: $showsDiscardConfirmation,
@@ -77,6 +84,7 @@ struct UltraWideRootView: View {
             didPrepare = true
             model.send(.prepare)
 #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-ui-settings-preview") { showsSettings = true }
             if ProcessInfo.processInfo.arguments.contains("-ui-exposure-preview") { showsExposureControl = true }
 #endif
         }
@@ -101,6 +109,15 @@ struct UltraWideRootView: View {
                 allowsMetering: model.canAdjustCamera && !model.isStarting,
                 onMeteringPoint: { model.send(.setMeteringPoint($0)) })
                 .ignoresSafeArea()
+                .overlay {
+                    if showsGrid {
+                        CompositionGrid()
+                            .stroke(.white.opacity(0.35), lineWidth: 0.5)
+                            .ignoresSafeArea()
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
                 .overlay {
                     LinearGradient(
                         colors: [.black.opacity(0.54), .clear, .black.opacity(0.66)],
@@ -187,10 +204,8 @@ struct UltraWideRootView: View {
                 }
                 .accessibilityLabel(tr("Annuler la prise de vue", "Cancel capture"))
             } else {
-                Image(systemName: "viewfinder")
-                    .font(.system(size: 20, weight: .light))
-                    .frame(width: 44, height: 44)
-                    .accessibilityHidden(true)
+                settingsButton
+                    .disabled(model.isStarting)
             }
             Spacer()
             if model.phase == .setup && !model.hasActiveSession {
@@ -208,6 +223,21 @@ struct UltraWideRootView: View {
             }
         }
         .buttonStyle(.plain)
+    }
+
+    private var settingsButton: some View {
+        Button {
+            showsExposureControl = false
+            showsSettings = true
+        } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 20, weight: .medium))
+                .frame(width: 44, height: 44)
+                .modifier(CameraGlassSurface(shape: Circle(), isInteractive: true))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(tr("Réglages de l’app", "App settings"))
+        .accessibilityIdentifier("appSettings")
     }
 
     private var exposureControl: some View {
@@ -740,7 +770,7 @@ struct UltraWideRootView: View {
             Text(tr("Aperçu", "Preview"))
                 .font(.subheadline.weight(.semibold))
             Spacer()
-            Color.clear.frame(width: 44, height: 44)
+            settingsButton
         }
         .buttonStyle(.plain)
     }
@@ -818,6 +848,7 @@ struct UltraWideRootView: View {
 
     private var unavailableScreen: some View {
         VStack(spacing: 18) {
+            HStack { Spacer(); settingsButton }
             Spacer()
             Image(systemName: "camera.fill")
                 .font(.system(size: 50, weight: .light))
@@ -988,5 +1019,20 @@ private struct CoverageMap: View {
     private func mapped(_ point: CGPoint, in bounds: CGRect) -> CGPoint {
         CGPoint(x: bounds.minX + point.x * bounds.width,
                 y: bounds.minY + point.y * bounds.height)
+    }
+}
+
+private struct CompositionGrid: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path { path in
+            for fraction in [1.0 / 3.0, 2.0 / 3.0] {
+                let x = rect.minX + rect.width * fraction
+                let y = rect.minY + rect.height * fraction
+                path.move(to: CGPoint(x: x, y: rect.minY))
+                path.addLine(to: CGPoint(x: x, y: rect.maxY))
+                path.move(to: CGPoint(x: rect.minX, y: y))
+                path.addLine(to: CGPoint(x: rect.maxX, y: y))
+            }
+        }
     }
 }

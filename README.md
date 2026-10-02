@@ -15,6 +15,14 @@ La caméra choisie reste la même pendant tout le balayage. Le résultat est un 
 
 Avant le balayage, le menu **Éclairage** permet de conserver **Auto (région)** ou de choisir **50 Hz / 60 Hz**. La durée de pose et l’ISO sont fixés avant la première image, en conservant la luminosité mesurée par la caméra. La durée intègre des cycles entiers de lumière électrique lorsque les limites du capteur le permettent. Les lampes à modulation indépendante du secteur peuvent encore produire des bandes ; ce réglage ne prétend pas détecter leur fréquence.
 
+## Réglages
+
+Le bouton **engrenage** ouvre les réglages depuis la caméra, l’aperçu du résultat ou l’écran d’indisponibilité. La section **Icône de l’app** propose l’icône originale et trois variantes : **Ambre**, **Aurore** et **Graphite**. Toucher une icône l’applique sur l’écran d’accueil ; l’originale reste disponible. Le choix actif est relu auprès d’iOS et un échec de changement est signalé sans modifier la sélection affichée.
+
+La **grille de cadrage** et le **retour haptique** sont mémorisés entre les lancements. La grille est désactivée par défaut ; les vibrations sont activées. Le réglage **Éclairage** est également accessible ici avant une nouvelle capture. Les réglages ne sont pas accessibles pendant le balayage ou l’assemblage.
+
+Les variantes conservent les calques vectoriels Icon Composer. Après une modification de l’icône principale, `python3 scripts/generate_icon_variants.py` régénère les variantes et leurs aperçus avec le moteur d’Icon Composer fourni par Xcode. L’argument de lancement Debug `-ui-settings-preview` ouvre directement les réglages dans le simulateur.
+
 ## Construire le projet
 
 - Xcode 27, SDK iOS 27, cible minimale **iOS 26**, iPhone avec caméra arrière.

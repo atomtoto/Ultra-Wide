@@ -245,7 +245,9 @@ final class UltraWideCoordinator {
             ui.saveState = .idle
             ui.phase = .review
             ui.isStarting = false
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            if AppPreferences.hapticsEnabled() {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            }
         } catch {
             ui.phase = .setup
             ui.isStarting = false
@@ -342,7 +344,9 @@ final class UltraWideCoordinator {
             ui.processingProgress = nil
             ui.phase = .review
             ui.banner = nil
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            if AppPreferences.hapticsEnabled() {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            }
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             ui.processingProgress = nil
@@ -389,7 +393,9 @@ final class UltraWideCoordinator {
             }
             ui.saveState = .saved
             ui.issue = nil
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            if AppPreferences.hapticsEnabled() {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            }
             capture.discard()
             synchronize()
         } catch {
@@ -459,7 +465,7 @@ final class UltraWideCoordinator {
             ui.sweep.guidanceDirection = nil
             ui.sweep.capturedField = nil
         }
-        if capture.status == .capturing, ui.sweep.coverageFraction - lastHapticFraction >= 0.02,
+        if AppPreferences.hapticsEnabled(), capture.status == .capturing, ui.sweep.coverageFraction - lastHapticFraction >= 0.02,
            Date().timeIntervalSince(lastHapticAt) >= 0.4 {
             acquisitionFeedback.selectionChanged()
             lastHapticFraction = ui.sweep.coverageFraction

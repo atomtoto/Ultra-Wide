@@ -164,6 +164,30 @@ final class ProgressiveSweepAssemblerTests: XCTestCase {
         XCTAssertEqual(sources, [264], "An unchanged failed reference graph must not repeat the same work.")
     }
 
+    func testRejectedViewIsNotRetriedWhenOnlyDistantReferencesChange() async throws {
+        let fixture = try ProgressiveFixture()
+        defer { fixture.remove() }
+        let plan = try makePlan()
+        let registration = CountingFrameRegistration(rejectedWidths: [264])
+        let assembler = ProgressiveSweepAssembler(registration: registration)
+        let session = UUID()
+        let anchor = try fixture.frame(width: 240, height: 320)
+        let near = try fixture.frame(width: 252, height: 336, yaw: 2)
+        let next = try fixture.frame(width: 276, height: 368, yaw: 4)
+        let rejected = try fixture.frame(width: 264, height: 352, yaw: 6)
+        let original = [anchor, near, next, rejected]
+        _ = try await assembler.update(sessionID: session, plan: plan, frames: original)
+        let before = await registration.registeredSourceWidths().filter { $0 == 264 }.count
+        XCTAssertEqual(before, 3)
+
+        let distant = try fixture.frame(width: 288, height: 384, yaw: -8)
+        let update = try await assembler.update(sessionID: session, plan: plan, frames: original + [distant])
+        XCTAssertNotNil(update.alignments[distant.id])
+        XCTAssertTrue(update.rejectedFrameIDs.contains(rejected.id))
+        let after = await registration.registeredSourceWidths().filter { $0 == 264 }.count
+        XCTAssertEqual(after, before, "The same three failed reference images must not be tried again.")
+    }
+
     func testNeighborDisagreementRejectsAnOtherwiseLocallyMatchedView() async throws {
         let fixture = try ProgressiveFixture()
         defer { fixture.remove() }
@@ -480,16 +504,18 @@ private actor CountingFrameRegistration: FrameRegistration {
                   homography: Homography3x3) async throws { }
     private let transforms: [Int: Homography3x3]
     private let rejectAll: Bool
+    private let rejectedWidths: Set<Int>
     private var sources: [Int] = []
 
-    init(transforms: [Int: Homography3x3] = [:], rejectAll: Bool = false) {
+    init(transforms: [Int: Homography3x3] = [:], rejectAll: Bool = false, rejectedWidths: Set<Int> = []) {
         self.transforms = transforms
         self.rejectAll = rejectAll
+        self.rejectedWidths = rejectedWidths
     }
 
     func register(source: RegistrationImage, reference: RegistrationImage) async throws -> VisualRegistration {
         sources.append(source.cgImage.width)
-        if rejectAll { throw VisualRegistrationFailure.noAlignment }
+        if rejectAll || rejectedWidths.contains(source.cgImage.width) { throw VisualRegistrationFailure.noAlignment }
         return VisualRegistration(homography: transforms[source.cgImage.width] ?? .identity,
                                   overlapFraction: 0.8, visualAgreement: 1)
     }

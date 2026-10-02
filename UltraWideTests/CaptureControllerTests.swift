@@ -7,6 +7,46 @@ import XCTest
 
 @MainActor
 final class CaptureControllerTests: XCTestCase {
+    func testGuidanceSurvivesFrameEvictionWhileRegistrationIsBlocked() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = CaptureSessionStore(rootURL: folder)
+        _ = try await storedSweep(in: store, count: 60)
+        let camera = BufferedTestCamera()
+        camera.unblockEncoder()
+        let motion = TestMotionProvider()
+        let assembler = GatedSweepAssembler(reducesFrames: false)
+        await assembler.release()
+        let capture = CaptureController(camera: camera, motion: motion, store: store, visualAssembler: assembler)
+        try await capture.resume()
+        for _ in 0..<200 {
+            if !capture.isVerifyingAlignment { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertNotNil(capture.sweepAnalysis?.target(from: CGPoint(x: 0.5, y: 0.5)))
+        await assembler.holdUpdates()
+        motion.emit(yaw: 0, speed: 0)
+        try capture.confirmReferenceAlignment()
+        try await capture.beginSweep()
+        try await Task.sleep(for: .milliseconds(40))
+        motion.emit(yaw: 20)
+        for _ in 0..<200 {
+            if capture.currentSnapshot?.frames.contains(where: { $0.yawDegrees == 20 }) == true,
+               capture.sweepAnalysis != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertTrue(capture.currentSnapshot?.frames.contains { $0.yawDegrees == 20 } ?? false)
+        XCTAssertEqual(capture.currentSnapshot?.frames.count, 60)
+        XCTAssertTrue(capture.isVerifyingAlignment)
+        XCTAssertFalse(capture.visualCoverage?.isComplete ?? true)
+        XCTAssertNotNil(capture.sweepAnalysis?.target(from: CGPoint(x: 0.5, y: 0.5)),
+                        "Retiring a source must not remove guidance until the image worker catches up.")
+        capture.discard()
+        await assembler.release()
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertNil(capture.sweepAnalysis, "A pending analysis cannot restore a discarded session.")
+    }
+
     func testCameraAdjustmentsApplyInPreviewAndAreLockedDuringSweep() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -148,6 +188,7 @@ final class CaptureControllerTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(40))
         motion.emit(yaw: 20)
         await fulfillment(of: [writing], timeout: 1)
+        camera.onEncodeStarted = nil
         await assembler.release()
         for _ in 0..<200 {
             if !capture.isVerifyingAlignment { break }
@@ -156,6 +197,12 @@ final class CaptureControllerTests: XCTestCase {
         XCTAssertTrue(capture.visualCoverage?.isComplete ?? false)
         XCTAssertFalse(capture.isFinishingSweep, "A full older update must not freeze the pending source.")
         XCTAssertEqual(capture.status, .capturing)
+        let selectedBeforeCompletion = camera.selectedCount
+        try await Task.sleep(for: .milliseconds(40))
+        motion.emit(yaw: -20)
+        for _ in 0..<10 { await Task.yield() }
+        XCTAssertEqual(camera.selectedCount, selectedBeforeCompletion,
+                       "Once coverage is full, new exposures must not keep extending the verification queue.")
         camera.unblockEncoder()
         for _ in 0..<200 {
             if capture.currentSnapshot?.frames.count == 3, !capture.isVerifyingAlignment { break }
@@ -166,6 +213,14 @@ final class CaptureControllerTests: XCTestCase {
         XCTAssertFalse(capture.isFinishingSweep)
         XCTAssertEqual(capture.status, .capturing)
         XCTAssertTrue(try store.load().isPassOpen)
+        try await Task.sleep(for: .milliseconds(40))
+        motion.emit(yaw: -20)
+        for _ in 0..<200 {
+            if camera.selectedCount > selectedBeforeCompletion { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertGreaterThan(camera.selectedCount, selectedBeforeCompletion,
+                             "If the final verification finds a gap, acquisition must resume.")
         capture.pause()
     }
 
@@ -754,9 +809,12 @@ private func storedSweep(in store: CaptureSessionStore, count: Int) async throws
 private actor GatedSweepAssembler: SweepAssembling {
     private var gate: CheckedContinuation<Void, Never>?
     private var blocked = true
+    private let reducesFrames: Bool
+    init(reducesFrames: Bool = true) { self.reducesFrames = reducesFrames }
+    func holdUpdates() { blocked = true }
     func update(sessionID: UUID, plan: CapturePlan, frames: [CapturedFrame]) async throws -> ProgressiveSweepUpdate {
         if blocked { await withCheckedContinuation { gate = $0 } }
-        return try await TestSweepAssembler().update(sessionID: sessionID, plan: plan, frames: frames)
+        return try await TestSweepAssembler(reducesFrames: reducesFrames).update(sessionID: sessionID, plan: plan, frames: frames)
     }
     func isPending() -> Bool { gate != nil }
     func release() { blocked = false; gate?.resume(); gate = nil }

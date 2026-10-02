@@ -79,10 +79,18 @@ actor ProgressiveSweepAssembler: SweepAssembling {
         for _ in 0..<2 {
         for frame in frames where views[frame.id] == nil {
             try Task.checkCancellation()
-            // Failed views can be retried once a new aligned neighbor arrives.
-            if failedReferences[frame.id] == Set(views.keys) { continue }
+            let references = views.values.sorted {
+                let left = hypot($0.frame.yawDegrees - frame.yawDegrees, $0.frame.pitchDegrees - frame.pitchDegrees)
+                let right = hypot($1.frame.yawDegrees - frame.yawDegrees, $1.frame.pitchDegrees - frame.pitchDegrees)
+                return left == right ? $0.frame.id.uuidString < $1.frame.id.uuidString : left < right
+            }.prefix(3)
+            let referenceIDs = Set(references.map { $0.frame.id })
+            // A new distant view does not change the three candidates we
+            // would retry. Only a changed local neighborhood warrants another
+            // expensive registration attempt for a previously rejected view.
+            if failedReferences[frame.id] == referenceIDs { continue }
             guard let (image, size) = Self.read(frame.fileURL) else {
-                rejected.insert(frame.id); failedReferences[frame.id] = Set(views.keys)
+                rejected.insert(frame.id); failedReferences[frame.id] = referenceIDs
                 continue
             }
             let photometry = LinearLuminanceImage(image.cgImage)
@@ -100,10 +108,6 @@ actor ProgressiveSweepAssembler: SweepAssembling {
                 transform = Homography3x3([sx, 0, (1 - sx) / 2, 0, sy, (1 - sy) / 2, 0, 0, 1])
                 luminanceGain = 1
             } else {
-                let references = views.values.sorted {
-                    hypot($0.frame.yawDegrees - frame.yawDegrees, $0.frame.pitchDegrees - frame.pitchDegrees)
-                        < hypot($1.frame.yawDegrees - frame.yawDegrees, $1.frame.pitchDegrees - frame.pitchDegrees)
-                }.prefix(3)
                 var matched: (transform: Homography3x3, gain: Double)?
                 var detailFailures = 0
                 for reference in references {
@@ -144,7 +148,7 @@ actor ProgressiveSweepAssembler: SweepAssembling {
                 guard let matched else {
                     if detailFailures == references.count { insufficientDetail.insert(frame.id) }
                     else { insufficientDetail.remove(frame.id) }
-                    rejected.insert(frame.id); failedReferences[frame.id] = Set(views.keys)
+                    rejected.insert(frame.id); failedReferences[frame.id] = referenceIDs
                     continue
                 }
                 transform = matched.transform

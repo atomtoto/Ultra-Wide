@@ -14,7 +14,12 @@ final class CaptureController: ObservableObject {
     @Published private(set) var guidance: CaptureGuidance?
     @Published private(set) var coverage: CaptureCoverage?
     @Published private(set) var assemblyPreview: CGImage?
-    @Published private(set) var visualCoverage: VisualSweepCoverage?
+    @Published private(set) var visualCoverage: VisualSweepCoverage? {
+        didSet {
+            if visualCoverage != oldValue { refreshSweepAnalysis() }
+        }
+    }
+    @Published private(set) var sweepAnalysis: SweepCoverageAnalysis?
     @Published private(set) var isVerifyingAlignment = false
     @Published private(set) var orientationNeedsCorrection = false
     @Published private(set) var orientationCorrection: CaptureError?
@@ -33,6 +38,7 @@ final class CaptureController: ObservableObject {
     private let visualAssembler: any SweepAssembling
     private var progressiveUpdate: ProgressiveSweepUpdate?
     private var alignmentTask: Task<Void, Never>?
+    private var coverageAnalysisTask: Task<Void, Never>?
     private var pendingAlignmentSnapshot: CaptureSessionSnapshot?
     private var snapshot: CaptureSessionSnapshot?
     private var tracker: CoverageTracker?
@@ -56,10 +62,6 @@ final class CaptureController: ObservableObject {
     var availableLenses: [CaptureLens] { camera.supportedLenses }
     var currentSnapshot: CaptureSessionSnapshot? { snapshot }
     var canAdjustCamera: Bool { status == .ready && snapshot == nil && !isCenterAnchoring }
-    var sweepAnalysis: SweepCoverageAnalysis? {
-        guard let update = progressiveUpdate, update.coverage == visualCoverage else { return nil }
-        return update.coverageAnalysis
-    }
     var preparedFocalRatio: Double? {
         guard let plan, preparedStitchInputs != nil else { return nil }
         return 1 / (2 * tan(plan.targetVerticalFOV * .pi / 360))
@@ -1033,7 +1035,10 @@ final class CaptureController: ObservableObject {
     }
 
     private func shouldSelect(_ reading: MotionReading, rateLimited: Bool = true) -> Bool {
-        guard let tracker, let plan else { return false }
+        // Once a verified field is full, drain only the exposures already
+        // selected. Further motion must not keep extending registration forever.
+        // A later incomplete update clears this latch and acquisition resumes.
+        guard !automaticFinishRequested, let tracker, let plan else { return false }
         if let rejected = progressiveUpdate?.rejectedFrameIDs,
            snapshot?.frames.contains(where: { frame in
                rejected.contains(frame.id) && Date().timeIntervalSince(frame.capturedAt) < 0.6
@@ -1112,8 +1117,35 @@ final class CaptureController: ObservableObject {
                     // A transient registration failure does not stop acquisition
                     // or paint motion-estimated regions as verified coverage.
                     guard generation == self.lifecycleGeneration else { return }
+                    self.automaticFinishRequested = false
+                    if self.status == .capturing { self.captureBlockReason = .alignmentFailed }
                 }
             }
+        }
+    }
+
+    private func refreshSweepAnalysis() {
+        coverageAnalysisTask?.cancel()
+        coverageAnalysisTask = nil
+        guard let confirmed = visualCoverage else {
+            sweepAnalysis = nil
+            return
+        }
+        if let update = progressiveUpdate, update.coverage == confirmed {
+            sweepAnalysis = update.coverageAnalysis
+            return
+        }
+        // Eviction can remove a footprint while the registration worker is
+        // still busy with older files. Rebuild guidance from the surviving
+        // verified footprints independently, without publishing a stale crop.
+        sweepAnalysis = nil
+        coverageAnalysisTask = Task { [weak self] in
+            let analysis = await Task.detached(priority: .userInitiated) {
+                SweepCoverageAnalysis(coverage: confirmed)
+            }.value
+            guard !Task.isCancelled, let self, self.visualCoverage == confirmed else { return }
+            self.sweepAnalysis = analysis
+            self.coverageAnalysisTask = nil
         }
     }
 

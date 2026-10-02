@@ -103,6 +103,41 @@ final class VisualFrameRegistrationTests: XCTestCase {
         }
     }
 
+    func testSmallContourOffsetCannotPassOnHighOverallCorrelation() throws {
+        let scene = RegistrationImage(try smoothScene())
+        for offset in [(3.0, 0.0), (0.0, -3.0), (2.5, 2.5)] {
+            let incorrect = Homography3x3([1, 0, offset.0 / 480,
+                                          0, 1, offset.1 / 640, 0, 0, 1])
+            XCTAssertThrowsError(try VisionFrameRegistration.verify(homography: incorrect,
+                source: scene, reference: scene)) { error in
+                guard case VisualRegistrationFailure.inconsistentContent = error else {
+                    return XCTFail("Expected a contour displacement rejection, received \(error)")
+                }
+            }
+        }
+    }
+
+    func testAccurateSmoothSceneAndSubpixelOffsetRemainUsable() throws {
+        let scene = RegistrationImage(try smoothScene())
+        for offset in [0.0, 0.5, -0.5] {
+            let transform = Homography3x3([1, 0, offset / 480, 0, 1, -offset / 640, 0, 0, 1])
+            let result = try VisionFrameRegistration.verify(homography: transform, source: scene, reference: scene)
+            XCTAssertGreaterThan(result.visualAgreement, 0.9)
+        }
+    }
+
+    private func smoothScene() throws -> CGImage {
+        let width = 480, height = 640
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        for y in 0..<height {
+            for x in 0..<width {
+                pixels[y * width + x] = UInt8((128 + 45 * sin(Double(x) * 0.2)
+                    + 45 * cos(Double(y) * 0.2)).rounded())
+            }
+        }
+        return try image(width: width, height: height, pixels: pixels)
+    }
+
     func testStrongParallaxCannotValidateCoverageFromOneMatchingHalf() async throws {
         let scene = try thumbnail(try fixture(), maximumSide: 600)
         let original = try grayPixels(scene)

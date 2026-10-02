@@ -66,6 +66,9 @@ struct VisualRegistration: Sendable {
     let overlapFraction: Double
     /// Fraction of textured local patches whose content agrees after alignment.
     let visualAgreement: Double
+    /// Global photometric agreement, used only to choose between transforms
+    /// which have independently passed all geometry and contour checks.
+    var contentCorrelation: Double = 0
 }
 
 enum VisualRegistrationFailure: Error, Sendable {
@@ -81,9 +84,17 @@ protocol FrameRegistration: Sendable {
     func register(source: RegistrationImage, reference: RegistrationImage) async throws -> VisualRegistration
     func register(source: RegistrationImage, reference: RegistrationImage,
                   initialEstimate: Homography3x3?) async throws -> VisualRegistration
+    func validate(source: RegistrationImage, reference: RegistrationImage,
+                  homography: Homography3x3) async throws
 }
 
 extension FrameRegistration {
+    func validate(source: RegistrationImage, reference: RegistrationImage,
+                  homography: Homography3x3) async throws {
+        try Task.checkCancellation()
+        _ = try VisionFrameRegistration.verify(homography: homography, source: source, reference: reference)
+    }
+
     func register(source: RegistrationImage, reference: RegistrationImage,
                   initialEstimate: Homography3x3?) async throws -> VisualRegistration {
         try await register(source: source, reference: reference)
@@ -95,6 +106,12 @@ extension FrameRegistration {
 /// returned transform against luminance patches before adding any coverage.
 actor VisionFrameRegistration: FrameRegistration {
     private let context = CIContext(options: [.cacheIntermediates: false])
+
+    func validate(source: RegistrationImage, reference: RegistrationImage,
+                  homography: Homography3x3) async throws {
+        try Task.checkCancellation()
+        _ = try Self.verify(homography: homography, source: source, reference: reference)
+    }
 
     func register(source: RegistrationImage, reference: RegistrationImage) async throws -> VisualRegistration {
         try registerImages(source: source, reference: reference, initialEstimate: nil)
@@ -149,7 +166,21 @@ actor VisionFrameRegistration: FrameRegistration {
             let toNormalized = Homography3x3([1 / width, 0, 0, 0, -1 / height, 1, 0, 0, 1])
             let residual = toPixels.concatenating(pixelTransform).concatenating(toNormalized)
             let homography = initialEstimate?.concatenating(residual) ?? residual
-            do { return try Self.verify(homography: homography, source: sourceImage, reference: referenceImage) }
+            do {
+                let refined = try Self.verify(homography: homography, source: sourceImage, reference: referenceImage)
+                // Vision may add a small but unnecessary residual to a good
+                // motion seed. Repeated residuals accumulate across a sweep.
+                // Compare both against the original images; motion alone is
+                // never enough to select the prior.
+                if let initialEstimate,
+                   let seeded = try? Self.verify(homography: initialEstimate, source: sourceImage, reference: referenceImage),
+                   seeded.contentCorrelation * seeded.visualAgreement >
+                       refined.contentCorrelation * refined.visualAgreement {
+                    return seeded
+                }
+                try Task.checkCancellation()
+                return refined
+            }
             catch {
                 guard let initialEstimate else { throw error }
                 return try Self.verify(homography: initialEstimate, source: sourceImage, reference: referenceImage)
@@ -197,15 +228,17 @@ actor VisionFrameRegistration: FrameRegistration {
         }
         // Patches sample a two-dimensional spread of the overlap. A single
         // matching foreground object cannot validate an unrelated background.
-        var overlapping = 0, tested = 0, textured = 0, agreed = 0
+        var overlapping = 0, tested = 0, textured = 0, agreed = 0, displaced = 0
         var sourceValues: [Double] = [], referenceValues: [Double] = []
         let halfPatch = 3
         for gridY in 0..<12 {
+            try Task.checkCancellation()
             for gridX in 0..<12 {
                 tested += 1
                 let centerX = (Double(gridX) + 0.5) / 12
                 let centerY = (Double(gridY) + 0.5) / 12
                 var localSource: [Double] = [], localReference: [Double] = []
+                var referencePoints: [CGPoint] = []
                 for y in -halfPatch...halfPatch {
                     for x in -halfPatch...halfPatch {
                         let point = CGPoint(x: centerX + Double(x) / Double(source.width),
@@ -213,6 +246,7 @@ actor VisionFrameRegistration: FrameRegistration {
                         guard let warped = homography.transform(point),
                               let a = source.sample(point), let b = reference.sample(warped) else { continue }
                         localSource.append(a); localReference.append(b)
+                        referencePoints.append(warped)
                     }
                 }
                 guard localSource.count >= 40 else { continue }
@@ -221,6 +255,25 @@ actor VisionFrameRegistration: FrameRegistration {
                 guard let correlation = correlation(localSource, localReference, minimumDeviation: 0.008) else { continue }
                 textured += 1
                 if correlation >= 0.5 { agreed += 1 }
+                // Correlation alone accepts a shifted edge: a window frame
+                // can correlate well while being several export pixels off.
+                // Compare the zero/one-pixel neighborhood with a small local
+                // search, using the same warped patch and normalized light.
+                var nearby = correlation, best = correlation
+                for dy in -3...3 {
+                    for dx in -3...3 where dx != 0 || dy != 0 {
+                        let offset = CGPoint(x: Double(dx) / Double(reference.width),
+                                             y: Double(dy) / Double(reference.height))
+                        let shifted = referencePoints.compactMap {
+                            reference.sample(CGPoint(x: $0.x + offset.x, y: $0.y + offset.y))
+                        }
+                        guard shifted.count == localSource.count,
+                              let score = Self.correlation(localSource, shifted, minimumDeviation: 0.008) else { continue }
+                        best = max(best, score)
+                        if abs(dx) <= 1 && abs(dy) <= 1 { nearby = max(nearby, score) }
+                    }
+                }
+                if best >= 0.85 && best > nearby + 0.06 { displaced += 1 }
             }
         }
         let overlap = Double(overlapping) / Double(tested)
@@ -230,10 +283,12 @@ actor VisionFrameRegistration: FrameRegistration {
             throw VisualRegistrationFailure.insufficientDetail
         }
         let agreement = Double(agreed) / Double(textured)
-        guard totalCorrelation >= 0.55, agreement >= 0.65 else {
+        guard totalCorrelation >= 0.55, agreement >= 0.65,
+              displaced < max(3, Int(ceil(Double(textured) * 0.15))) else {
             throw VisualRegistrationFailure.inconsistentContent
         }
-        return VisualRegistration(homography: homography, overlapFraction: overlap, visualAgreement: agreement)
+        return VisualRegistration(homography: homography, overlapFraction: overlap,
+                                  visualAgreement: agreement, contentCorrelation: totalCorrelation)
     }
 
     private nonisolated static func geometryIsUsable(_ h: Homography3x3) -> Bool {

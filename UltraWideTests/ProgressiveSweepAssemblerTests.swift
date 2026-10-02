@@ -164,6 +164,26 @@ final class ProgressiveSweepAssemblerTests: XCTestCase {
         XCTAssertEqual(sources, [264], "An unchanged failed reference graph must not repeat the same work.")
     }
 
+    func testNeighborDisagreementRejectsAnOtherwiseLocallyMatchedView() async throws {
+        let fixture = try ProgressiveFixture()
+        defer { fixture.remove() }
+        let center = try fixture.frame(width: 240, height: 320)
+        let right = try fixture.frame(width: 264, height: 352, yaw: 8)
+        let farther = try fixture.frame(width: 288, height: 384, yaw: 12)
+        let registration = InconsistentNeighborRegistration()
+        let assembler = ProgressiveSweepAssembler(registration: registration)
+        let session = UUID()
+        let before = try await assembler.update(sessionID: session, plan: makePlan(), frames: [center, right])
+        let after = try await assembler.update(sessionID: session, plan: makePlan(), frames: [center, right, farther])
+        XCTAssertNil(after.alignments[farther.id])
+        XCTAssertNil(after.polygonsByFrame[farther.id])
+        XCTAssertTrue(after.rejectedFrameIDs.contains(farther.id))
+        XCTAssertTrue(after.retainedFrameIDs.contains(farther.id))
+        XCTAssertEqual(after.coverage.fraction, before.coverage.fraction, accuracy: 1e-12)
+        let checked = await registration.checkedWidths()
+        XCTAssertEqual(Set(checked), [240, 264], "Both candidate paths must be checked against their other neighbor.")
+    }
+
     func testProvisionalRejectIsRetainedAndRecoversThroughNewBridgeImage() async throws {
         let fixture = try ProgressiveFixture()
         defer { fixture.remove() }
@@ -439,7 +459,25 @@ final class ProgressiveSweepAssemblerTests: XCTestCase {
     }
 }
 
+private actor InconsistentNeighborRegistration: FrameRegistration {
+    private var checked: [Int] = []
+
+    func register(source: RegistrationImage, reference: RegistrationImage) async throws -> VisualRegistration {
+        VisualRegistration(homography: .identity, overlapFraction: 0.9, visualAgreement: 0.95)
+    }
+
+    func validate(source: RegistrationImage, reference: RegistrationImage,
+                  homography: Homography3x3) async throws {
+        checked.append(reference.cgImage.width)
+        throw VisualRegistrationFailure.inconsistentContent
+    }
+
+    func checkedWidths() -> [Int] { checked }
+}
+
 private actor CountingFrameRegistration: FrameRegistration {
+    func validate(source: RegistrationImage, reference: RegistrationImage,
+                  homography: Homography3x3) async throws { }
     private let transforms: [Int: Homography3x3]
     private let rejectAll: Bool
     private var sources: [Int] = []
@@ -460,6 +498,8 @@ private actor CountingFrameRegistration: FrameRegistration {
 }
 
 private actor BridgingFrameRegistration: FrameRegistration {
+    func validate(source: RegistrationImage, reference: RegistrationImage,
+                  homography: Homography3x3) async throws { }
     private var pairs: [String] = []
 
     func register(source: RegistrationImage, reference: RegistrationImage) async throws -> VisualRegistration {
@@ -477,6 +517,8 @@ private actor BridgingFrameRegistration: FrameRegistration {
 }
 
 private actor SuspendingFrameRegistration: FrameRegistration {
+    func validate(source: RegistrationImage, reference: RegistrationImage,
+                  homography: Homography3x3) async throws { }
     private var continuation: CheckedContinuation<Void, Never>?
 
     func register(source: RegistrationImage, reference: RegistrationImage) async throws -> VisualRegistration {

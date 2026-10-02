@@ -118,6 +118,21 @@ actor ProgressiveSweepAssembler: SweepAssembling {
                         guard Self.plausible(candidate, frame: frame, plan: plan),
                               let polygon = VisualSweepCoverage.footprint(candidate),
                               VisualSweepCoverage.overlap(polygon, reference.polygon) >= 0.15 else { continue }
+                        // A chain can agree with its last neighbor and still
+                        // drift from earlier views. Verify the actual candidate
+                        // against the other overlapping neighbors before its
+                        // footprint is allowed to complete the sweep.
+                        for neighbor in references where neighbor.frame.id != reference.frame.id {
+                            guard VisualSweepCoverage.overlap(polygon, neighbor.polygon) >= 0.25,
+                                  let inverse = neighbor.transform.inverted() else { continue }
+                            do {
+                                try await registration.validate(source: image, reference: neighbor.image,
+                                    homography: candidate.concatenating(inverse))
+                            } catch VisualRegistrationFailure.insufficientDetail { continue }
+                            catch VisualRegistrationFailure.insufficientOverlap { continue }
+                        }
+                        try Task.checkCancellation()
+                        guard self.sessionID == sessionID else { throw CancellationError() }
                         let gain = LinearLuminanceImage.gain(source: photometry, reference: reference.photometry,
                             sourceToReference: result.homography, referenceGain: reference.luminanceGain)
                         matched = (candidate, gain)

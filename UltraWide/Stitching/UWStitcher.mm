@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+#include "UWBlendSampling.hpp"
 #endif
 
 #import "UWStitcher.h"
@@ -441,7 +442,12 @@ static BlendPlan BuildBlendPlan(
     const cv::Rect2f &globalBounds
 ) {
     BlendPlan plan;
-    plan.scale = std::min(1.0, 256.0 / std::max(globalBounds.width, globalBounds.height));
+    // Resolve seams with more detail for short sweeps, while bounding the
+    // storage of the projected images and graph-cut working planes. Long
+    // sweeps retain the existing 256-pixel memory floor.
+    const double seamSide = std::clamp(std::sqrt(64.0 * 1024 * 1024 /
+        (32.0 * std::max<size_t>(1, geometry.size()))), 256.0, 768.0);
+    plan.scale = std::min(1.0, seamSide / std::max(globalBounds.width, globalBounds.height));
     const int width = std::max(1, static_cast<int>(std::ceil(globalBounds.width * plan.scale)) + 2);
     const int height = std::max(1, static_cast<int>(std::ceil(globalBounds.height * plan.scale)) + 2);
     std::vector<cv::Mat> projectedImages, originalMasks;
@@ -1071,9 +1077,9 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         const double seamStartY = (cropWorld.y - globalBounds.y) * blendPlan.scale;
         const double seamStepX = blendPlan.scale / scaleX;
         const double seamStepY = blendPlan.scale / scaleY;
-        std::vector<int> seamColumns(outputW);
+        std::vector<double> seamColumns(outputW);
         for (int x = 0; x < outputW; ++x) {
-            seamColumns[x] = static_cast<int>(std::round(seamStartX + x * seamStepX));
+            seamColumns[x] = seamStartX + x * seamStepX;
         }
 
         stage = "full-resolution render";
@@ -1136,9 +1142,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                             cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
                         for (int y = std::max(top, tileY); y < std::min(bottom, tileY + tileH); ++y) {
                             const cv::Vec3b *row = tile.ptr<cv::Vec3b>(y - tileY);
-                            const int seamY = static_cast<int>(std::round(seamStartY + y * seamStepY));
-                            const uint8_t *seamRow = seamY >= 0 && seamY < seamWeight.rows
-                                ? seamWeight.ptr<uint8_t>(seamY) : nullptr;
+                            const double seamY = seamStartY + y * seamStepY;
                             for (int x = std::max(left, tileX); x < std::min(right, tileX + tileW); ++x) {
                                 const double denominator = h20 * x + h21 * y + h22;
                                 if (std::abs(denominator) < 1e-8) continue;
@@ -1151,9 +1155,12 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                                               source.rows - 1.0 - sourceY});
                                 const size_t offset = static_cast<size_t>(y) * outputW + x;
                                 const uint16_t previous = weights[offset];
-                                const int seamX = seamColumns[x];
-                                const uint8_t softMask = seamRow && seamX >= 0 && seamX < seamWeight.cols
-                                    ? seamRow[seamX] : 0;
+                                // Nearest-neighbor enlargement of a tiny seam
+                                // mask creates rectangular steps on straight
+                                // edges. Sample the soft mask continuously in
+                                // both axes at the actual output pixel.
+                                const double softMask = uw::BilinearMaskWeight(seamWeight.ptr<uint8_t>(),
+                                    seamWeight.cols, seamWeight.rows, seamWeight.step, seamColumns[x], seamY);
                                 if (!softMask && previous) continue;
                                 const uint16_t contribution = static_cast<uint16_t>(std::clamp(
                                     256.0 * edge / featherWidth *

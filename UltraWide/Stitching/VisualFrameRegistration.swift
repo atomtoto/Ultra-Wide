@@ -111,6 +111,9 @@ extension FrameRegistration {
 /// Vision's confidence is not a content match score: independently verify the
 /// returned transform against luminance patches before adding any coverage.
 actor VisionFrameRegistration: FrameRegistration {
+    // Grain and interpolation can prefer a nearby sample without locating a
+    // contour reliably. Count only strong peaks with a shared displacement.
+    private static let minimumContourMatch = 0.97
     private let context = CIContext(options: [.cacheIntermediates: false])
 
     func validate(source: RegistrationImage, reference: RegistrationImage,
@@ -129,7 +132,7 @@ actor VisionFrameRegistration: FrameRegistration {
     }
 
     private func registerImages(source: RegistrationImage, reference: RegistrationImage,
-                                initialEstimate: Homography3x3?) throws -> VisualRegistration {
+                                initialEstimate: Homography3x3?, refinementBudget: Int = 1) throws -> VisualRegistration {
         try Task.checkCancellation()
         return try autoreleasepool {
             guard let sourceImage = source.luminance, let referenceImage = reference.luminance else {
@@ -200,8 +203,21 @@ actor VisionFrameRegistration: FrameRegistration {
             }
             catch {
                 try Task.checkCancellation()
-                guard let seedResult else { throw error }
-                return try seedResult.get()
+                if let seeded { return seeded }
+                // A high content match may still contain a small Vision
+                // residual. Retry once from that candidate, and require the
+                // complete verifier before returning any refined transform.
+                if refinementBudget > 0,
+                   let quality = try? Self.verify(homography: homography, source: sourceImage,
+                       reference: referenceImage, enforceContours: false),
+                   quality.contentCorrelation >= 0.90, quality.visualAgreement >= 0.75,
+                   let refined = try? registerImages(source: source, reference: reference,
+                       initialEstimate: homography, refinementBudget: refinementBudget - 1) {
+                    try Task.checkCancellation()
+                    return refined
+                }
+                try Task.checkCancellation()
+                throw error
             }
         }
     }
@@ -239,7 +255,7 @@ actor VisionFrameRegistration: FrameRegistration {
     }
 
     private nonisolated static func verify(
-        homography: Homography3x3, source: RegistrationLuminance, reference: RegistrationLuminance
+        homography: Homography3x3, source: RegistrationLuminance, reference: RegistrationLuminance, enforceContours: Bool = true
     ) throws -> VisualRegistration {
         guard geometryIsUsable(homography) else { throw VisualRegistrationFailure.invalidGeometry }
         guard source.standardDeviation > 0.012, reference.standardDeviation > 0.012 else {
@@ -248,8 +264,8 @@ actor VisionFrameRegistration: FrameRegistration {
         // Patches sample a two-dimensional spread of the overlap. A single
         // matching foreground object cannot validate an unrelated background.
         var overlapping = 0, tested = 0, textured = 0, agreed = 0, displaced = 0
+        var displacements: [(x: Double, y: Double, regions: [Int])] = []
         var regionalTexture = [Int](repeating: 0, count: 4)
-        var regionalDisplacement = [Int](repeating: 0, count: 4)
         var sourceValues: [Double] = [], referenceValues: [Double] = []
         let halfPatch = 3
         for gridY in 0..<12 {
@@ -294,35 +310,41 @@ actor VisionFrameRegistration: FrameRegistration {
                     let shifted = referencePoints.compactMap {
                         reference.sample(CGPoint(x: $0.x + offset.x, y: $0.y + offset.y))
                     }
-                    guard shifted.count == localSource.count else { return nil }
-                    guard let gradient = Self.gradients(shifted) else { return nil }
-                    return Self.correlation(sourceGradient, gradient, minimumDeviation: 0.004)
+                    guard shifted.count == localSource.count,
+                          let gradient = Self.gradients(shifted),
+                          let contour = Self.correlation(sourceGradient, gradient, minimumDeviation: 0.004)
+                    else { return nil }
+                    return contour
                 }
-                // The margin tolerates resampling and 8-bit quantization on
-                // subpixel matches. Stop once no farther score can beat it.
+                // Search the entire immediate neighborhood. Stopping at the
+                // first good sample makes the displacement direction depend
+                // on traversal order, especially along repeating straight edges.
                 var nearby = contourScore
-                var patchIsDisplaced = false
-                nearbySearch: for dy in -1...1 {
+                var preferred = (dx: 0, dy: 0, contour: contourScore)
+                for dy in -1...1 {
                     for dx in -1...1 where dx != 0 || dy != 0 {
-                        if nearby >= 0.95 { break nearbySearch }
-                        if let score = score(dx: dx, dy: dy) { nearby = max(nearby, score) }
+                        if let score = score(dx: dx, dy: dy), score > nearby {
+                            nearby = score
+                            preferred = (dx, dy, score)
+                        }
                     }
                 }
-                if nearby >= 0.85 && nearby > contourScore + 0.05 {
-                    patchIsDisplaced = true
-                } else if nearby < 0.95 {
+                if !(nearby >= Self.minimumContourMatch && nearby > contourScore + 0.05), nearby < 0.95 {
                     outerSearch: for dy in -3...3 {
                         for dx in -3...3 where abs(dx) > 1 || abs(dy) > 1 {
-                            if let score = score(dx: dx, dy: dy), score >= 0.85, score > nearby + 0.05 {
-                                patchIsDisplaced = true
+                            if let score = score(dx: dx, dy: dy), score >= Self.minimumContourMatch,
+                               score > nearby + 0.05 {
+                                preferred = (dx, dy, score)
                                 break outerSearch
                             }
                         }
                     }
                 }
+                let patchIsDisplaced = preferred.contour >= Self.minimumContourMatch && preferred.contour > contourScore + 0.05
                 if patchIsDisplaced {
                     displaced += 1
-                    for region in regions { regionalDisplacement[region] += 1 }
+                    let length = hypot(Double(preferred.dx), Double(preferred.dy))
+                    displacements.append((Double(preferred.dx) / length, Double(preferred.dy) / length, regions))
                 }
             }
         }
@@ -333,15 +355,29 @@ actor VisionFrameRegistration: FrameRegistration {
             throw VisualRegistrationFailure.insufficientDetail
         }
         let agreement = Double(agreed) / Double(textured)
-        // A matching wall must not hide displaced foreground contours in one
-        // half of the overlap. Require sufficient texture in each tested half.
+        // Random preferred directions reflect noise/resampling, whereas a
+        // shared direction indicates a real registration error. Check each
+        // half too, so matching background cannot hide local foreground drift.
+        var coherent = 0
+        var coherentRegions = [Int](repeating: 0, count: 4)
+        for direction in 0..<8 {
+            let angle = Double(direction) * .pi / 4
+            let dx = cos(angle), dy = sin(angle)
+            let aligned = displacements.filter { $0.x * dx + $0.y * dy >= 0.9 }
+            coherent = max(coherent, aligned.count)
+            for region in 0..<4 {
+                coherentRegions[region] = max(coherentRegions[region], aligned.filter { $0.regions.contains(region) }.count)
+            }
+        }
         let hasLocalParallax = (0..<4).contains { region in
-            regionalTexture[region] >= 16 && regionalDisplacement[region]
+            regionalTexture[region] >= 16 && coherentRegions[region]
                 >= max(3, Int(ceil(Double(regionalTexture[region]) * 0.12)))
         }
+        CaptureDiagnostics.log("registration_verify",
+            String(format: "correlation=%.4f agreement=%.4f textured=%d displaced=%d coherent=%d",
+                   totalCorrelation, agreement, textured, displaced, coherent))
         guard totalCorrelation >= 0.55, agreement >= 0.65,
-              !hasLocalParallax,
-              displaced < max(2, Int(ceil(Double(textured) * 0.08))) else {
+              !enforceContours || (!hasLocalParallax && coherent < max(2, Int(ceil(Double(textured) * 0.08)))) else {
             throw VisualRegistrationFailure.inconsistentContent
         }
         return VisualRegistration(homography: homography, overlapFraction: overlap,

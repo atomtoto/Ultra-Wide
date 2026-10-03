@@ -37,6 +37,24 @@ final class UltraWideCoordinator {
             }
         }.store(in: &cancellables)
         synchronize()
+        if CaptureDiagnostics.enabled {
+            Task { @MainActor [weak self] in
+                var previous = CACurrentMediaTime()
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                    guard let self else { return }
+                    let now = CACurrentMediaTime()
+                    CaptureDiagnostics.log("heartbeat",
+                        String(format: "main_lag_ms=%.1f memory_mb=%.1f thermal=%ld frames=%ld queued=%ld coverage=%.4f verifying=%@ status=%@",
+                            max(0, now - previous - 1) * 1000, CaptureDiagnostics.footprintMegabytes(),
+                            ProcessInfo.processInfo.thermalState.rawValue, self.capture.currentSnapshot?.frames.count ?? 0,
+                            self.capture.completedCount - (self.capture.currentSnapshot?.frames.count ?? 0),
+                            self.capture.visualCoverage?.fraction ?? 0, String(self.capture.isVerifyingAlignment),
+                            String(describing: self.capture.status)))
+                    previous = now
+                }
+            }
+        }
     }
 
     private func handle(_ action: CaptureUIAction) async {

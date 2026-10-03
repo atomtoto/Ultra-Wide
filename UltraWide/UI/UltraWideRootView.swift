@@ -391,11 +391,20 @@ struct UltraWideRootView: View {
                 }
             }
             .aspectRatio(isLandscape ? 4.0 / 3.0 : 3.0 / 4.0, contentMode: .fit)
-            Text(fieldHint)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
+            if model.phase == .setup && model.hasRecoverableSession {
+                Button(tr("Reprendre le balayage", "Resume sweep")) {
+                    model.send(.resume)
+                }
+                .buttonStyle(.glass)
+                .controlSize(.small)
+                .disabled(model.isStarting)
+            } else {
+                Text(fieldHint)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
         }
         .padding(16)
         .modifier(CameraGlassSurface(shape: RoundedRectangle(cornerRadius: 24, style: .continuous)))

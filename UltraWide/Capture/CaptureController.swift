@@ -821,7 +821,10 @@ final class CaptureController: ObservableObject {
               abs(reading.rollDegrees) < SweepCapturePolicy.maximumRollDegrees,
               hasCaptureCapacity else { return nil }
         do {
+            let selectionStarted = CaptureDiagnostics.start()
             let selected = try await camera.selectVideoFrame(near: reading.sampleTimestamp)
+            CaptureDiagnostics.log("frame_selected", since: selectionStarted,
+                "frames=\(saved.frames.count) sample_age_ms=\(Int((CACurrentMediaTime() - selected.timestamp) * 1000))")
             guard generation == lifecycleGeneration, status == .capturing, !isFinishingSweep,
                   snapshot?.sessionID == saved.sessionID,
                   !frameQueue.isFull, hasCaptureCapacity else { return nil }
@@ -909,9 +912,13 @@ final class CaptureController: ObservableObject {
         }
         guard isCurrent() else { return nil }
         do {
+            let encodingStarted = CaptureDiagnostics.start()
             let data = try await camera.encodeSelectedFrame(selected)
+            CaptureDiagnostics.log("frame_encoded", since: encodingStarted, "bytes=\(data.count)")
             guard isCurrent() else { return nil }
+            let writingStarted = CaptureDiagnostics.start()
             let url = try await store.writePhoto(data, id: frame.id, sessionID: sessionID)
+            CaptureDiagnostics.log("frame_written", since: writingStarted)
             guard isCurrent(), var saved = snapshot else {
                 store.removePhoto(at: url)
                 return nil
@@ -960,11 +967,13 @@ final class CaptureController: ObservableObject {
             // Only durable files enter the manifest and the stitch snapshot.
             saved.coverageFraction = confirmedCoverage(in: saved)?.fraction ?? 0
             saved.updatedAt = Date()
+            let manifestStarted = CaptureDiagnostics.start()
             do { try await store.saveAsync(saved) }
             catch {
                 store.removePhoto(at: url)
                 throw error
             }
+            CaptureDiagnostics.log("manifest_saved", since: manifestStarted, "frames=\(saved.frames.count)")
             guard isCurrent() else {
                 store.removePhoto(at: url)
                 return nil
@@ -1049,9 +1058,15 @@ final class CaptureController: ObservableObject {
         // selected. Further motion must not keep extending registration forever.
         // A later incomplete update clears this latch and acquisition resumes.
         guard !automaticFinishRequested, let tracker, let plan else { return false }
-        if let rejected = progressiveUpdate?.rejectedFrameIDs,
+        // A rejected source remains available for the worker to retry when a
+        // new neighbor bridges it. Re-encoding the same failed pose cannot
+        // improve that graph and can otherwise fill the budget indefinitely.
+        // Low-detail views may improve after focus or lighting settles.
+        if let update = progressiveUpdate,
            snapshot?.frames.contains(where: { frame in
-               rejected.contains(frame.id) && Date().timeIntervalSince(frame.capturedAt) < 0.6
+               update.rejectedFrameIDs.contains(frame.id)
+                   && (!update.insufficientDetailFrameIDs.contains(frame.id)
+                       || Date().timeIntervalSince(frame.capturedAt) < 2)
                    && hypot((frame.yawDegrees - reading.yawDegrees) / plan.sourceHorizontalFOV,
                             (frame.pitchDegrees - reading.pitchDegrees) / plan.sourceVerticalFOV) < 0.035
                    && abs(frame.rollDegrees - reading.rollDegrees) < 2
@@ -1100,7 +1115,10 @@ final class CaptureController: ObservableObject {
             while let next = self.pendingAlignmentSnapshot {
                 self.pendingAlignmentSnapshot = nil
                 do {
+                    let alignmentStarted = CaptureDiagnostics.start()
                     let update = try await assembler.update(sessionID: next.sessionID, plan: next.plan, frames: next.frames)
+                    CaptureDiagnostics.log("alignment_update", since: alignmentStarted,
+                        "frames=\(next.frames.count) accepted=\(update.alignments.count) rejected=\(update.rejectedFrameIDs.count) coverage=\(update.coverage.fraction)")
                     guard !Task.isCancelled, generation == self.lifecycleGeneration,
                           self.snapshot?.sessionID == next.sessionID else { return }
                     self.progressiveUpdate = update
@@ -1124,6 +1142,7 @@ final class CaptureController: ObservableObject {
                     }
                 } catch is CancellationError { return }
                 catch {
+                    CaptureDiagnostics.log("alignment_error", "error=\(String(reflecting: error))")
                     // A transient registration failure does not stop acquisition
                     // or paint motion-estimated regions as verified coverage.
                     guard generation == self.lifecycleGeneration else { return }

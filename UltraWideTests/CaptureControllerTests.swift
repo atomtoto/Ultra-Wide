@@ -7,6 +7,49 @@ import XCTest
 
 @MainActor
 final class CaptureControllerTests: XCTestCase {
+    func testRejectedPoseDoesNotKeepEncodingWhileOtherViewsRemainAvailable() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let store = CaptureSessionStore(rootURL: folder)
+        _ = try await storedSweep(in: store, count: 1)
+        let camera = BufferedTestCamera()
+        camera.unblockEncoder()
+        let motion = TestMotionProvider()
+        let capture = CaptureController(camera: camera, motion: motion, store: store,
+                                        visualAssembler: RejectingSweepAssembler())
+        defer { capture.discard() }
+        try await capture.resume()
+        for _ in 0..<200 {
+            if !capture.isVerifyingAlignment { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        motion.emit(yaw: 0, speed: 0)
+        try capture.confirmReferenceAlignment()
+        try await capture.beginSweep()
+        try await Task.sleep(for: .milliseconds(40))
+        motion.emit(yaw: 20, speed: 0)
+        for _ in 0..<200 {
+            if capture.currentSnapshot?.frames.count == 2, !capture.isVerifyingAlignment { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(capture.currentSnapshot?.frames.count, 2)
+        XCTAssertEqual(capture.captureBlockReason, .alignmentFailed)
+        // This exceeds the old 600 ms retry window. An unchanged rejected
+        // pose must keep its durable source rather than fill the frame budget.
+        for _ in 0..<30 {
+            try await Task.sleep(for: .milliseconds(35))
+            motion.emit(yaw: 20, speed: 0)
+        }
+        XCTAssertEqual(capture.currentSnapshot?.frames.count, 2)
+        motion.emit(yaw: -20, speed: 0)
+        for _ in 0..<200 {
+            if capture.currentSnapshot?.frames.count == 3 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTAssertEqual(capture.currentSnapshot?.frames.count, 3,
+                       "A rejected pose must not prevent acquiring another overlapping view.")
+    }
+
     func testSinglePhotoForwardsOutputResolutionToCamera() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -787,6 +830,17 @@ private struct TestSweepAssembler: SweepAssembling {
         return ProgressiveSweepUpdate(sessionID: sessionID, frameIDs: Set(frames.map(\.id)),
             alignments: alignments, polygonsByFrame: polygons, rejectedFrameIDs: [],
             retainedFrameIDs: Set(retained.map(\.id)), preview: nil)
+    }
+}
+
+private struct RejectingSweepAssembler: SweepAssembling {
+    func update(sessionID: UUID, plan: CapturePlan, frames: [CapturedFrame]) async throws -> ProgressiveSweepUpdate {
+        let accepted = try await TestSweepAssembler(reducesFrames: false).update(
+            sessionID: sessionID, plan: plan, frames: Array(frames.prefix(1)))
+        return ProgressiveSweepUpdate(sessionID: sessionID, frameIDs: Set(frames.map(\.id)),
+            alignments: accepted.alignments, polygonsByFrame: accepted.polygonsByFrame,
+            rejectedFrameIDs: Set(frames.dropFirst().map(\.id)),
+            retainedFrameIDs: Set(frames.map(\.id)), preview: nil)
     }
 }
 

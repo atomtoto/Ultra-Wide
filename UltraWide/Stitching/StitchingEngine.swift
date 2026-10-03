@@ -128,6 +128,8 @@ public actor StitchingEngine {
             )
         }
         let outcome: UWStitchOutcome
+        let diagnosticTrace = CaptureDiagnostics.enabled ? CaptureDiagnostics.ExportTrace() : nil
+        CaptureDiagnostics.log("export_start", "frames=\(inputs.count) maximum_mp=\(maximumMegapixels) prepared=\(preparedFocalRatio != nil)")
         do {
             outcome = try UWStitcher.stitchFrames(
                 frames,
@@ -138,11 +140,13 @@ public actor StitchingEngine {
                 minimumVerticalFOVDegrees: minimumVerticalFOVDegrees ?? 0,
                 preparedFocalRatio: preparedFocalRatio ?? 0,
                 progress: { fraction in
+                    diagnosticTrace?.record(fraction)
                     progress(fraction)
                     return !Task<Never, Never>.isCancelled
                 }
             )
         } catch {
+            CaptureDiagnostics.log("export_error", "error=\(String(reflecting: error))")
             throw StitchingFailure(error as NSError)
         }
         return StitchResult(

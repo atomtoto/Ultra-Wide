@@ -7,12 +7,28 @@ struct AppSettingsView: View {
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppPreferences.gridKey) private var showsGrid = false
     @AppStorage(AppPreferences.hapticsKey) private var hapticsEnabled = true
+    @AppStorage(AppPreferences.outputResolutionKey) private var outputResolution = OutputResolution.mp16.rawValue
     @State private var icons = AppIconStore()
 
     var body: some View {
         NavigationStack {
             Form {
                 iconSection
+                Section {
+                    Picker(selection: $outputResolution) {
+                        ForEach(OutputResolution.allCases) { resolution in
+                            Text("\(resolution.rawValue) MP").tag(resolution.rawValue)
+                        }
+                    } label: {
+                        Label(tr("Résolution maximale", "Maximum resolution"), systemImage: "photo")
+                    }
+                    .accessibilityIdentifier("outputResolution")
+                } header: {
+                    Text(tr("Image de sortie", "Output image"))
+                } footer: {
+                    Text(tr("S’applique aux prochaines prises de vue, pour Photos et le partage. Une résolution plus élevée peut allonger l’assemblage et augmenter la taille du fichier. Le résultat dépend des images source et de la mémoire de l’iPhone, sans agrandissement artificiel.",
+                            "Applies to future captures, for Photos and sharing. Higher resolutions can increase assembly time and file size. The result depends on source images and iPhone memory, without upscaling."))
+                }
                 Section {
                     Toggle(isOn: $showsGrid) {
                         Label(tr("Grille de cadrage", "Composition grid"), systemImage: "grid")

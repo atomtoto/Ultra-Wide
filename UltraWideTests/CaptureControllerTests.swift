@@ -7,6 +7,25 @@ import XCTest
 
 @MainActor
 final class CaptureControllerTests: XCTestCase {
+    func testSinglePhotoForwardsOutputResolutionToCamera() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let camera = BufferedTestCamera()
+        let expected = SinglePhotoResult(url: folder.appendingPathComponent("photo.jpg"),
+                                         pixelWidth: 2308, pixelHeight: 1731)
+        camera.singlePhotoResult = expected
+        let capture = makeCaptureController(camera: camera, motion: TestMotionProvider(),
+            store: CaptureSessionStore(rootURL: folder))
+        try await capture.preparePreview(lens: .wide, target: .one)
+        let result = try await capture.captureSinglePhoto(to: folder.appendingPathComponent("photo"),
+                                                         maximumMegapixels: 4)
+        XCTAssertEqual(camera.singlePhotoMaximumMegapixels, 4)
+        XCTAssertEqual(result.url, expected.url)
+        XCTAssertEqual(result.pixelWidth, expected.pixelWidth)
+        XCTAssertEqual(result.pixelHeight, expected.pixelHeight)
+        XCTAssertEqual(capture.status, .idle)
+    }
+
     func testGuidanceSurvivesFrameEvictionWhileRegistrationIsBlocked() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -673,6 +692,8 @@ private final class BufferedTestCamera: CameraCapturing {
     var quality = PhotoQualityResult(sharpness: 100, brightness: 0.5, quality: .good)
     var meteringPoint: CGPoint?
     var exposureBias: Float = 0
+    var singlePhotoResult: SinglePhotoResult?
+    private(set) var singlePhotoMaximumMegapixels: Int?
     private var encoder: CheckedContinuation<Void, Never>?
     private var encoderBlocked = true
     private var exposure: CheckedContinuation<Void, Never>?
@@ -705,8 +726,10 @@ private final class BufferedTestCamera: CameraCapturing {
         return Data([0xff, 0xd8, 0xff, 0xd9])
     }
     func unblockEncoder() { encoderBlocked = false; encoder?.resume(); encoder = nil }
-    func captureSinglePhoto(to baseURL: URL, cropFactor: Double) async throws -> SinglePhotoResult {
-        throw CaptureError.notReady
+    func captureSinglePhoto(to baseURL: URL, cropFactor: Double, maximumMegapixels: Int) async throws -> SinglePhotoResult {
+        singlePhotoMaximumMegapixels = maximumMegapixels
+        guard let singlePhotoResult else { throw CaptureError.notReady }
+        return singlePhotoResult
     }
 }
 

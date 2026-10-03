@@ -92,4 +92,18 @@ final class AppSettingsTests: XCTestCase {
         defaults.set(true, forKey: AppPreferences.hapticsKey)
         XCTAssertTrue(AppPreferences.hapticsEnabled(defaults: defaults))
     }
+
+    func testOutputResolutionDefaultsTo16MPAndRestoresSavedChoice() throws {
+        let suite = "OutputResolutionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(AppPreferences.outputResolution(defaults: defaults), .mp16)
+        defaults.set(4, forKey: AppPreferences.outputResolutionKey)
+        XCTAssertEqual(AppPreferences.outputResolution(defaults: defaults), .mp4)
+        defaults.set(48, forKey: AppPreferences.outputResolutionKey)
+        let restoredDefaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        XCTAssertEqual(AppPreferences.outputResolution(defaults: restoredDefaults), .mp48)
+        defaults.set(999, forKey: AppPreferences.outputResolutionKey)
+        XCTAssertEqual(AppPreferences.outputResolution(defaults: defaults), .mp16)
+    }
 }

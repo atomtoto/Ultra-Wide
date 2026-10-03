@@ -13,7 +13,7 @@ protocol CameraCapturing: AnyObject {
     func prepareForSweep() async throws
     func selectVideoFrame(near motionTimestamp: TimeInterval) async throws -> SelectedVideoFrame
     func encodeSelectedFrame(_ selected: SelectedVideoFrame) async throws -> Data
-    func captureSinglePhoto(to baseURL: URL, cropFactor: Double) async throws -> SinglePhotoResult
+    func captureSinglePhoto(to baseURL: URL, cropFactor: Double, maximumMegapixels: Int) async throws -> SinglePhotoResult
     @MainActor func pause()
 }
 

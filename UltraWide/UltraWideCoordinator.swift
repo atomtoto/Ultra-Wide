@@ -233,7 +233,9 @@ final class UltraWideCoordinator {
                 .appendingPathComponent("UltraWideResults", isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let baseURL = folder.appendingPathComponent(UUID().uuidString)
-            let result = try await capture.captureSinglePhoto(to: baseURL)
+            let result = try await capture.captureSinglePhoto(
+                to: baseURL, maximumMegapixels: AppPreferences.outputResolution().rawValue
+            )
             guard let preview = makeThumbnail(url: result.url, maxPixelSize: 1800) else {
                 throw CaptureError.photoDataUnavailable
             }
@@ -319,7 +321,7 @@ final class UltraWideCoordinator {
             let result = try await stitcher.stitch(
                 inputs: inputs,
                 outputURL: outputURL,
-                maximumMegapixels: 16,
+                maximumMegapixels: AppPreferences.outputResolution().rawValue,
                 targetAspectRatio: snapshot.plan.orientation.isPortrait ? 3.0 / 4.0 : 4.0 / 3.0,
                 minimumHorizontalFOVDegrees: crop == nil ? snapshot.plan.targetHorizontalFOV : nil,
                 minimumVerticalFOVDegrees: crop == nil ? snapshot.plan.targetVerticalFOV : nil,

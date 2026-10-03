@@ -186,13 +186,13 @@ final class CaptureController: ObservableObject {
         return factor >= 0.995 ? max(1, factor) : nil
     }
 
-    func captureSinglePhoto(to baseURL: URL) async throws -> SinglePhotoResult {
+    func captureSinglePhoto(to baseURL: URL, maximumMegapixels: Int = 16) async throws -> SinglePhotoResult {
         guard status == .ready, snapshot == nil, !captureRequested,
               let factor = singlePhotoCropFactor else { throw CaptureError.notReady }
         captureRequested = true
         defer { captureRequested = false }
         let result = try await camera.captureSinglePhoto(
-            to: baseURL, cropFactor: factor
+            to: baseURL, cropFactor: factor, maximumMegapixels: maximumMegapixels
         )
         camera.pause()
         motion.stop()

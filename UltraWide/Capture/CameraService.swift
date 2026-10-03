@@ -451,7 +451,8 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
     /// needs only a centered crop, avoiding the sweep and feature registration.
     func captureSinglePhoto(
         to baseURL: URL,
-        cropFactor: Double
+        cropFactor: Double,
+        maximumMegapixels: Int = 16
     ) async throws -> SinglePhotoResult {
         let capture = try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<(Data, String, Double), Error>) in
@@ -493,7 +494,7 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
                 do {
                     let result = try Self.writeSinglePhoto(
                         capture.0, fileExtension: capture.1, to: baseURL,
-                        cropFactor: cropFactor / capture.2
+                        cropFactor: cropFactor / capture.2, maximumMegapixels: maximumMegapixels
                     )
                     continuation.resume(returning: result)
                 } catch {
@@ -507,7 +508,8 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         _ data: Data,
         fileExtension: String,
         to baseURL: URL,
-        cropFactor: Double
+        cropFactor: Double,
+        maximumMegapixels: Int = 16
     ) throws -> SinglePhotoResult {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
@@ -520,7 +522,8 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         let uprightWidth = swapsAxes ? rawHeight : rawWidth
         let uprightHeight = swapsAxes ? rawWidth : rawHeight
         let url = baseURL.appendingPathExtension(fileExtension)
-        if cropFactor <= 1.01 {
+        let maxPixels = Double(max(1, min(maximumMegapixels, 48))) * 1_000_000
+        if cropFactor <= 1.01, Double(uprightWidth) * Double(uprightHeight) <= maxPixels {
             do { try data.write(to: url, options: .atomic) }
             catch { throw CaptureError.diskWriteFailed }
             return SinglePhotoResult(url: url, pixelWidth: uprightWidth,
@@ -536,23 +539,42 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
         else { throw CaptureError.photoDataUnavailable }
         let width = upright.width
         let height = upright.height
-        let cropWidth = max(1, Int((Double(width) / cropFactor).rounded(.down)))
-        let cropHeight = max(1, Int((Double(height) / cropFactor).rounded(.down)))
+        let effectiveCropFactor = cropFactor > 1.01 ? cropFactor : 1
+        let cropWidth = max(1, Int((Double(width) / effectiveCropFactor).rounded(.down)))
+        let cropHeight = max(1, Int((Double(height) / effectiveCropFactor).rounded(.down)))
         let cropRect = CGRect(x: (width - cropWidth) / 2, y: (height - cropHeight) / 2,
                               width: cropWidth, height: cropHeight)
-        guard let crop = upright.cropping(to: cropRect),
-              let destination = CGImageDestinationCreateWithURL(
+        guard let crop = upright.cropping(to: cropRect) else { throw CaptureError.photoDataUnavailable }
+        let scale = min(1, sqrt(maxPixels / (Double(cropWidth) * Double(cropHeight))))
+        let outputWidth = max(1, Int((Double(cropWidth) * scale).rounded(.down)))
+        let outputHeight = max(1, Int((Double(cropHeight) * scale).rounded(.down)))
+        let output: CGImage
+        if outputWidth == cropWidth, outputHeight == cropHeight {
+            output = crop
+        } else {
+            guard let context = CGContext(
+                data: nil, width: outputWidth, height: outputHeight,
+                bitsPerComponent: 8, bytesPerRow: 0,
+                space: crop.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+            ) else { throw CaptureError.photoDataUnavailable }
+            context.interpolationQuality = .high
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight))
+            guard let resized = context.makeImage() else { throw CaptureError.photoDataUnavailable }
+            output = resized
+        }
+        guard let destination = CGImageDestinationCreateWithURL(
                 url as CFURL, fileExtension == "heic" ? "public.heic" as CFString
                     : "public.jpeg" as CFString, 1, nil
               ) else { throw CaptureError.photoDataUnavailable }
-        CGImageDestinationAddImage(destination, crop, [
+        CGImageDestinationAddImage(destination, output, [
             kCGImageDestinationLossyCompressionQuality: 0.93
         ] as CFDictionary)
         guard CGImageDestinationFinalize(destination) else {
             try? FileManager.default.removeItem(at: url)
             throw CaptureError.diskWriteFailed
         }
-        return SinglePhotoResult(url: url, pixelWidth: cropWidth, pixelHeight: cropHeight)
+        return SinglePhotoResult(url: url, pixelWidth: outputWidth, pixelHeight: outputHeight)
     }
 }
 

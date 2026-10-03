@@ -446,6 +446,20 @@ final class ProgressiveSweepAssemblerTests: XCTestCase {
                        "The bright half outside the matching footprint describes a different scene and must not affect compensation.")
     }
 
+    func testUnmeasurableExposureKeepsTheMatchedReferenceCorrection() async throws {
+        let fixture = try ProgressiveFixture()
+        defer { fixture.remove() }
+        let anchor = try fixture.photometricFrame(linearScale: 1)
+        let darker = try fixture.photometricFrame(linearScale: 0.5, yaw: 8)
+        let clipped = try fixture.photometricFrame(linearScale: 100, yaw: 16)
+        let assembler = ProgressiveSweepAssembler(registration: CountingFrameRegistration())
+        let result = try await assembler.update(sessionID: UUID(), plan: makePlan(), frames: [anchor, darker, clipped])
+        let inherited = try XCTUnwrap(result.alignments[darker.id]?.luminanceGain)
+        XCTAssertEqual(inherited, 2, accuracy: 0.06)
+        XCTAssertEqual(try XCTUnwrap(result.alignments[clipped.id]?.luminanceGain), inherited,
+                       "An unmeasurable overlap must not reset the inherited correction to unity.")
+    }
+
     func testPreviewFeathersSourceEdgesAndKeepsItsInteriorOpaque() async throws {
         let fixture = try ProgressiveFixture()
         defer { fixture.remove() }

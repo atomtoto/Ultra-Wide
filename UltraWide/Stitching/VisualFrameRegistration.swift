@@ -248,6 +248,8 @@ actor VisionFrameRegistration: FrameRegistration {
         // Patches sample a two-dimensional spread of the overlap. A single
         // matching foreground object cannot validate an unrelated background.
         var overlapping = 0, tested = 0, textured = 0, agreed = 0, displaced = 0
+        var regionalTexture = [Int](repeating: 0, count: 4)
+        var regionalDisplacement = [Int](repeating: 0, count: 4)
         var sourceValues: [Double] = [], referenceValues: [Double] = []
         let halfPatch = 3
         for gridY in 0..<12 {
@@ -276,11 +278,16 @@ actor VisionFrameRegistration: FrameRegistration {
                 sourceValues += localSource; referenceValues += localReference
                 guard let correlation = correlation(localSource, localReference, minimumDeviation: 0.008) else { continue }
                 textured += 1
+                let regions = [gridX < 6 ? 0 : 1, gridY < 6 ? 2 : 3]
+                for region in regions { regionalTexture[region] += 1 }
                 if correlation >= 0.5 { agreed += 1 }
-                // Correlation alone accepts a shifted edge: a window frame
-                // can correlate well while being several export pixels off.
-                // Compare the zero/one-pixel neighborhood with a small local
-                // search, using the same warped patch and normalized light.
+                // Brightness correlation can stay high on a shifted wall or
+                // straight edge. Compare gradients, and treat a preferred
+                // one-pixel shift as a mismatch: it grows at export resolution.
+                guard let sourceGradient = Self.gradients(localSource),
+                      let referenceGradient = Self.gradients(localReference),
+                      let contourScore = Self.correlation(sourceGradient, referenceGradient, minimumDeviation: 0.004),
+                      contourScore < 0.95 else { continue }
                 func score(dx: Int, dy: Int) -> Double? {
                     let offset = CGPoint(x: Double(dx) / Double(reference.width),
                                          y: Double(dy) / Double(reference.height))
@@ -288,27 +295,34 @@ actor VisionFrameRegistration: FrameRegistration {
                         reference.sample(CGPoint(x: $0.x + offset.x, y: $0.y + offset.y))
                     }
                     guard shifted.count == localSource.count else { return nil }
-                    return Self.correlation(localSource, shifted, minimumDeviation: 0.008)
+                    guard let gradient = Self.gradients(shifted) else { return nil }
+                    return Self.correlation(sourceGradient, gradient, minimumDeviation: 0.004)
                 }
-                // Correlation cannot exceed 1. Once the nearby score reaches
-                // 0.94, no offset can beat it by the required 0.06. Otherwise
-                // finish the 3x3 neighborhood before searching farther away.
-                var nearby = correlation
+                // The margin tolerates resampling and 8-bit quantization on
+                // subpixel matches. Stop once no farther score can beat it.
+                var nearby = contourScore
+                var patchIsDisplaced = false
                 nearbySearch: for dy in -1...1 {
                     for dx in -1...1 where dx != 0 || dy != 0 {
-                        if nearby >= 0.94 { break nearbySearch }
+                        if nearby >= 0.95 { break nearbySearch }
                         if let score = score(dx: dx, dy: dy) { nearby = max(nearby, score) }
                     }
                 }
-                if nearby < 0.94 {
+                if nearby >= 0.85 && nearby > contourScore + 0.05 {
+                    patchIsDisplaced = true
+                } else if nearby < 0.95 {
                     outerSearch: for dy in -3...3 {
                         for dx in -3...3 where abs(dx) > 1 || abs(dy) > 1 {
-                            if let score = score(dx: dx, dy: dy), score >= 0.85, score > nearby + 0.06 {
-                                displaced += 1
+                            if let score = score(dx: dx, dy: dy), score >= 0.85, score > nearby + 0.05 {
+                                patchIsDisplaced = true
                                 break outerSearch
                             }
                         }
                     }
+                }
+                if patchIsDisplaced {
+                    displaced += 1
+                    for region in regions { regionalDisplacement[region] += 1 }
                 }
             }
         }
@@ -319,8 +333,15 @@ actor VisionFrameRegistration: FrameRegistration {
             throw VisualRegistrationFailure.insufficientDetail
         }
         let agreement = Double(agreed) / Double(textured)
+        // A matching wall must not hide displaced foreground contours in one
+        // half of the overlap. Require sufficient texture in each tested half.
+        let hasLocalParallax = (0..<4).contains { region in
+            regionalTexture[region] >= 16 && regionalDisplacement[region]
+                >= max(3, Int(ceil(Double(regionalTexture[region]) * 0.12)))
+        }
         guard totalCorrelation >= 0.55, agreement >= 0.65,
-              displaced < max(3, Int(ceil(Double(textured) * 0.15))) else {
+              !hasLocalParallax,
+              displaced < max(2, Int(ceil(Double(textured) * 0.08))) else {
             throw VisualRegistrationFailure.inconsistentContent
         }
         return VisualRegistration(homography: homography, overlapFraction: overlap,
@@ -346,6 +367,20 @@ actor VisionFrameRegistration: FrameRegistration {
             twiceArea += Double(a.x * b.y - a.y * b.x)
         }
         return twiceArea >= 0.24 && twiceArea <= 16
+    }
+
+    private nonisolated static func gradients(_ values: [Double]) -> [Double]? {
+        guard values.count == 49 else { return nil }
+        var result: [Double] = []
+        result.reserveCapacity(50)
+        for y in 1..<6 {
+            for x in 1..<6 {
+                let index = y * 7 + x
+                result.append(values[index + 1] - values[index - 1])
+                result.append(values[index + 7] - values[index - 7])
+            }
+        }
+        return result
     }
 
     private nonisolated static func correlation(_ a: [Double], _ b: [Double], minimumDeviation: Double) -> Double? {

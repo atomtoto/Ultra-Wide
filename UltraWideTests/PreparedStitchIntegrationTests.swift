@@ -58,11 +58,45 @@ final class PreparedStitchIntegrationTests: XCTestCase {
         XCTAssertTrue(result.reusedPreparedAlignment)
         let source = try XCTUnwrap(CGImageSourceCreateWithURL(result.imageURL as CFURL, nil))
         let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
-        let actual = try displayP3Center(image)
+        let actual = try displayP3Sample(image)
         for channel in 0..<3 {
             let expected = encodeDisplayP3(sourceColor[channel] * 2)
             XCTAssertEqual(actual[channel], expected, accuracy: 0.035,
                            "Prepared export must multiply linear light; multiplying gamma-encoded bytes changes brightness and color.")
+        }
+#endif
+    }
+
+    func testTiltedExposureCorrectedSourcesKeepUniformColorAcrossSeamsAndEdges() async throws {
+#if targetEnvironment(simulator)
+        throw XCTSkip("Native OpenCV export is unavailable in the simulator.")
+#else
+        let color = [0.08, 0.20, 0.12]
+        let anchor = try makeColorFixture(linearColor: color)
+        let darker = try makeColorFixture(linearColor: color.map { $0 / 2 })
+        defer {
+            try? FileManager.default.removeItem(at: anchor.directory)
+            try? FileManager.default.removeItem(at: darker.directory)
+        }
+        let left = StitchAlignment(normalizedHomography: [0.9, 0.05, -0.12, -0.04, 1.25, -0.10, 0, 0, 1],
+            sourcePixelWidth: 960, sourcePixelHeight: 1280)
+        let right = StitchAlignment(normalizedHomography: [0.9, -0.05, 0.30, 0.04, 1.25, -0.14, 0, 0, 1],
+            sourcePixelWidth: 960, sourcePixelHeight: 1280, luminanceGain: 2)
+        let result = try await StitchingEngine().stitch(
+            inputs: [StitchInput(url: anchor.image, alignment: left), StitchInput(url: darker.image, alignment: right)],
+            outputURL: anchor.directory.appendingPathComponent("uniform-tilted.heic"),
+            maximumMegapixels: 2, targetAspectRatio: 0.75,
+            minimumHorizontalFOVDegrees: 40, minimumVerticalFOVDegrees: 50, preparedFocalRatio: 1)
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(result.imageURL as CFURL, nil))
+        let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        for y in [0.01, 0.2, 0.5, 0.8, 0.99] {
+            for x in [0.01, 0.2, 0.5, 0.8, 0.99] {
+                let actual = try displayP3Sample(image, x: x, y: y)
+                for channel in 0..<3 {
+                    XCTAssertEqual(actual[channel], encodeDisplayP3(color[channel]), accuracy: 0.018,
+                        "Transparent source borders and exposure changes must not darken a uniform scene at \(x), \(y).")
+                }
+            }
         }
 #endif
     }
@@ -201,10 +235,11 @@ final class PreparedStitchIntegrationTests: XCTestCase {
         return (directory, url)
     }
 
-    private func displayP3Center(_ image: CGImage) throws -> [Double] {
+    private func displayP3Sample(_ image: CGImage, x: Double = 0.5, y: Double = 0.5) throws -> [Double] {
         var pixel = [UInt8](repeating: 0, count: 4)
         let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
-        let center = CGRect(x: CGFloat(image.width / 2), y: CGFloat(image.height / 2), width: 1, height: 1)
+        let center = CGRect(x: CGFloat(Int(Double(image.width) * x)), y: CGFloat(Int(Double(image.height) * y)),
+                            width: 1, height: 1)
         let sample = try XCTUnwrap(image.cropping(to: center))
         try pixel.withUnsafeMutableBytes { bytes in
             let context = try XCTUnwrap(CGContext(data: bytes.baseAddress, width: 1, height: 1,

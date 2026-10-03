@@ -144,19 +144,30 @@ actor ProgressiveSweepAssembler: SweepAssembling {
                         // drift from earlier views. Verify the actual candidate
                         // against the other overlapping neighbors before its
                         // footprint is allowed to complete the sweep.
+                        var photometricReferences = [reference]
                         for neighbor in references where neighbor.frame.id != reference.frame.id {
                             guard VisualSweepCoverage.overlap(polygon, neighbor.polygon) >= 0.25,
                                   let inverse = neighbor.transform.inverted() else { continue }
                             do {
                                 try await registration.validate(source: image, reference: neighbor.image,
                                     homography: candidate.concatenating(inverse))
+                                photometricReferences.append(neighbor)
                             } catch VisualRegistrationFailure.insufficientDetail { continue }
                             catch VisualRegistrationFailure.insufficientOverlap { continue }
                         }
                         try Task.checkCancellation()
                         guard self.sessionID == sessionID else { throw CancellationError() }
-                        let gain = LinearLuminanceImage.gain(source: photometry, reference: reference.photometry,
-                            sourceToReference: result.homography, referenceGain: reference.luminanceGain)
+                        let estimates = photometricReferences.compactMap { neighbor -> Double? in
+                            guard let inverse = neighbor.transform.inverted() else { return nil }
+                            return LinearLuminanceImage.gain(source: photometry, reference: neighbor.photometry,
+                                sourceToReference: candidate.concatenating(inverse), referenceGain: neighbor.luminanceGain)
+                                .map { log2($0) }
+                        }.sorted()
+                        // Consensus avoids inheriting a single noisy exposure
+                        // estimate along the registration chain. An unmeasurable
+                        // overlap keeps the reference correction, not unity.
+                        let gain = estimates.isEmpty ? reference.luminanceGain
+                            : exp2((estimates[(estimates.count - 1) / 2] + estimates[estimates.count / 2]) / 2)
                         matched = (candidate, gain)
                         break
                     } catch is CancellationError { throw CancellationError() }
@@ -407,7 +418,7 @@ private struct LinearLuminanceImage {
     }
 
     private func sample(_ point: CGPoint) -> Double? {
-        let x = Double(point.x) * Double(width - 1), y = Double(point.y) * Double(height - 1)
+        let x = Double(point.x) * Double(width) - 0.5, y = Double(point.y) * Double(height) - 0.5
         guard x.isFinite, y.isFinite, x >= 1, y >= 1,
               x < Double(width - 2), y < Double(height - 2) else { return nil }
         let ix = Int(x), iy = Int(y), fx = x - Double(ix), fy = y - Double(iy)
@@ -419,8 +430,8 @@ private struct LinearLuminanceImage {
     }
 
     static func gain(source: Self?, reference: Self?, sourceToReference: Homography3x3,
-                     referenceGain: Double) -> Double {
-        guard let source, let reference else { return 1 }
+                     referenceGain: Double) -> Double? {
+        guard let source, let reference else { return nil }
         var ratios: [Double] = []
         var cells: Set<Int> = []
         for row in 0..<48 {
@@ -434,12 +445,12 @@ private struct LinearLuminanceImage {
                 ratios.append(ratio); cells.insert((row / 12) * 4 + column / 12)
             }
         }
-        guard ratios.count >= 80, cells.count >= 3 else { return 1 }
+        guard ratios.count >= 80, cells.count >= 3 else { return nil }
         ratios.sort()
         let median = ratios[ratios.count / 2]
         let deviations = ratios.map { abs($0 - median) }.sorted()
         // Strong spatial changes cannot be repaired with one exposure gain.
-        guard deviations[deviations.count / 2] < 0.4 else { return 1 }
+        guard deviations[deviations.count / 2] < 0.4 else { return nil }
         return min(4, max(0.25, exp2(median) * referenceGain))
     }
 }

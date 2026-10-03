@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <vector>
 #include "UWBlendSampling.hpp"
+#include "UWLinearBlend.hpp"
 #include "UWParallelRender.hpp"
 #include "UWRenderSupport.hpp"
 #endif
@@ -150,7 +151,7 @@ static cv::Mat ReadBGR(NSURL *url, int maximumSide) {
         return {};
     }
     cv::Mat rgba(static_cast<int>(height), static_cast<int>(width), CV_8UC4);
-    // Keep the entire 8-bit SDR working and export pipeline in Display P3.
+    // Decode SDR sources into Display P3; blending subsequently uses linear light.
     CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceDisplayP3);
     CGContextRef context = CGBitmapContextCreate(
         rgba.data, width, height, 8, rgba.step[0], colorSpace,
@@ -311,33 +312,42 @@ static bool FindCoveredRectangle(const cv::Mat &mask, double aspect, cv::Rect &r
     return true;
 }
 
-static const std::array<float, 256> &LinearDecodeLUT() {
-    static const std::array<float, 256> values = [] {
-        std::array<float, 256> result;
-        for (int value = 0; value < 256; ++value) {
-            const double encoded = value / 255.0;
-            result[value] = static_cast<float>(encoded <= 0.04045 ? encoded / 12.92
-                : std::pow((encoded + 0.055) / 1.055, 2.4));
-        }
-        return result;
-    }();
-    return values;
+static cv::Mat ProjectionTransform(const FrameGeometry &frame, const cv::Size &sourceSize,
+                                   const cv::Point2d &worldOrigin, double scaleX, double scaleY,
+                                   bool normalizedGeometry) {
+    // Swift's normalized transforms map image edges. OpenCV addresses pixel
+    // centers, so both source edges and destination centers need a half pixel.
+    const float first = normalizedGeometry ? -0.5f : 0;
+    const float lastX = sourceSize.width - (normalizedGeometry ? 0.5f : 1.0f);
+    const float lastY = sourceSize.height - (normalizedGeometry ? 0.5f : 1.0f);
+    const std::array<cv::Point2f, 4> source = {
+        cv::Point2f(first, first), cv::Point2f(lastX, first),
+        cv::Point2f(lastX, lastY), cv::Point2f(first, lastY)
+    };
+    std::array<cv::Point2f, 4> destination;
+    for (size_t j = 0; j < 4; ++j) {
+        destination[j] = cv::Point2f(
+            static_cast<float>((frame.worldCorners[j].x - worldOrigin.x) * scaleX - 0.5),
+            static_cast<float>((frame.worldCorners[j].y - worldOrigin.y) * scaleY - 0.5));
+    }
+    return cv::getPerspectiveTransform(source.data(), destination.data());
 }
 
-static std::array<uint8_t, 256> LinearGainLUT(double gain) {
-    const auto &decoded = LinearDecodeLUT();
-    std::array<uint8_t, 256> result;
-    for (int value = 0; value < 256; ++value) {
-        const double linear = std::clamp(decoded[value] * gain, 0.0, 1.0);
-        const double encoded = linear <= 0.0031308 ? linear * 12.92
-            : 1.055 * std::pow(linear, 1.0 / 2.4) - 0.055;
-        result[value] = static_cast<uint8_t>(std::clamp(static_cast<int>(std::round(encoded * 255)), 0, 255));
+static cv::Mat LinearImage(const cv::Mat &encoded, double gain) {
+    const auto values = uw::LinearGainLUT(gain);
+    cv::Mat linear(encoded.size(), CV_16UC3);
+    for (int y = 0; y < encoded.rows; ++y) {
+        const cv::Vec3b *source = encoded.ptr<cv::Vec3b>(y);
+        cv::Vec<uint16_t, 3> *destination = linear.ptr<cv::Vec<uint16_t, 3>>(y);
+        for (int x = 0; x < encoded.cols; ++x) {
+            for (int channel = 0; channel < 3; ++channel) destination[x][channel] = values[source[x][channel]];
+        }
     }
-    return result;
+    return linear;
 }
 
 static cv::Vec3f LinearColor(const cv::Vec3b &color) {
-    const auto &decoded = LinearDecodeLUT();
+    const auto &decoded = uw::LinearDecodeLUT();
     return cv::Vec3f(decoded[color[0]], decoded[color[1]], decoded[color[2]]);
 }
 
@@ -360,20 +370,7 @@ static std::vector<double> EstimateExposureGains(
     gains.reserve(geometry.size());
     for (const auto &frame : geometry) {
         const cv::Mat &thumbnail = thumbnails[frame.inputIndex];
-        std::array<cv::Point2f, 4> sourceCorners = {
-            cv::Point2f(0, 0),
-            cv::Point2f(static_cast<float>(thumbnail.cols - 1), 0),
-            cv::Point2f(static_cast<float>(thumbnail.cols - 1), static_cast<float>(thumbnail.rows - 1)),
-            cv::Point2f(0, static_cast<float>(thumbnail.rows - 1))
-        };
-        std::array<cv::Point2f, 4> destinationCorners;
-        for (int j = 0; j < 4; ++j) {
-            destinationCorners[j] = cv::Point2f(
-                static_cast<float>((frame.worldCorners[j].x - globalBounds.x) * previewScale),
-                static_cast<float>((frame.worldCorners[j].y - globalBounds.y) * previewScale)
-            );
-        }
-        cv::Mat transform = cv::getPerspectiveTransform(sourceCorners.data(), destinationCorners.data());
+        cv::Mat transform = ProjectionTransform(frame, thumbnail.size(), globalBounds.tl(), previewScale, previewScale, false);
         cv::Mat warped, mask;
         cv::warpPerspective(thumbnail, warped, transform, cv::Size(previewW, previewH),
                             cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
@@ -433,7 +430,7 @@ static std::vector<double> EstimateExposureGains(
 struct BlendPlan {
     double scale = 1;
     std::vector<cv::Mat> seamWeights; // Soft graph-cut masks in global preview coordinates.
-    cv::Mat multibandPreview;         // CV_32FC3, low-resolution reference for final color.
+    cv::Mat multibandPreview;         // CV_32FC3, linear-light reference for final luminance.
     cv::Mat multibandMask;            // Valid reference pixels; transparent edges must not darken the export.
 };
 
@@ -441,7 +438,8 @@ static BlendPlan BuildBlendPlan(
     const std::vector<FrameGeometry> &geometry,
     const std::vector<cv::Mat> &thumbnails,
     const std::vector<double> &gains,
-    const cv::Rect2f &globalBounds
+    const cv::Rect2f &globalBounds,
+    bool normalizedGeometry
 ) {
     BlendPlan plan;
     // Resolve seams with more detail for short sweeps, while bounding the
@@ -461,41 +459,29 @@ static BlendPlan BuildBlendPlan(
     seamMasks.reserve(geometry.size());
 
     for (size_t i = 0; i < geometry.size(); ++i) {
-        const auto colorLUT = LinearGainLUT(gains[i]);
         const auto &frame = geometry[i];
         const cv::Mat &thumbnail = thumbnails[frame.inputIndex];
-        const std::array<cv::Point2f, 4> sourceCorners = {
-            cv::Point2f(0, 0),
-            cv::Point2f(static_cast<float>(thumbnail.cols - 1), 0),
-            cv::Point2f(static_cast<float>(thumbnail.cols - 1), static_cast<float>(thumbnail.rows - 1)),
-            cv::Point2f(0, static_cast<float>(thumbnail.rows - 1))
-        };
-        std::array<cv::Point2f, 4> destinationCorners;
-        for (int j = 0; j < 4; ++j) {
-            destinationCorners[j] = cv::Point2f(
-                static_cast<float>((frame.worldCorners[j].x - globalBounds.x) * plan.scale),
-                static_cast<float>((frame.worldCorners[j].y - globalBounds.y) * plan.scale)
-            );
-        }
-        cv::Mat transform = cv::getPerspectiveTransform(sourceCorners.data(), destinationCorners.data());
+        cv::Mat transform = ProjectionTransform(frame, thumbnail.size(), globalBounds.tl(), plan.scale, plan.scale, normalizedGeometry);
         cv::Mat projected, mask;
-        cv::warpPerspective(thumbnail, projected, transform, cv::Size(width, height),
-                            cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
+        // Color outside the real footprint is needed by the Laplacian pyramid.
+        // Reflect it instead of introducing black into nearby valid pixels.
+        // Only the zero-padded mask controls actual source coverage.
+        cv::warpPerspective(LinearImage(thumbnail, gains[i]), projected, transform, cv::Size(width, height),
+                            cv::INTER_LINEAR, cv::BORDER_REFLECT);
         cv::Mat sourceMask(thumbnail.size(), CV_8U, cv::Scalar(255));
         cv::warpPerspective(sourceMask, mask, transform, cv::Size(width, height),
                             cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar());
+        cv::Mat floatImage(projected.size(), CV_32FC3);
+        const auto &encoded = uw::LinearEncodeLUT();
         for (int y = 0; y < height; ++y) {
-            cv::Vec3b *row = projected.ptr<cv::Vec3b>(y);
-            const uint8_t *maskRow = mask.ptr<uint8_t>(y);
+            const cv::Vec<uint16_t, 3> *row = projected.ptr<cv::Vec<uint16_t, 3>>(y);
+            cv::Vec3f *seamRow = floatImage.ptr<cv::Vec3f>(y);
             for (int x = 0; x < width; ++x) {
-                if (!maskRow[x]) continue;
                 for (int channel = 0; channel < 3; ++channel) {
-                    row[x][channel] = colorLUT[row[x][channel]];
+                    seamRow[x][channel] = encoded[row[x][channel]];
                 }
             }
         }
-        cv::Mat floatImage;
-        projected.convertTo(floatImage, CV_32FC3);
         cv::UMat seamImage, seamMask;
         floatImage.copyTo(seamImage);
         mask.copyTo(seamMask);
@@ -522,12 +508,13 @@ static BlendPlan BuildBlendPlan(
         fallback.find(seamImages, origins, seamMasks);
     }
 
-    cv::detail::MultiBandBlender blender(false, 5, CV_16S);
+    cv::detail::MultiBandBlender blender(false, 5, CV_32F);
     blender.prepare(cv::Rect(0, 0, width, height));
     for (size_t i = 0; i < geometry.size(); ++i) {
         cv::Mat seam = seamMasks[i].getMat(cv::ACCESS_READ).clone();
         cv::Mat shortImage;
-        projectedImages[i].convertTo(shortImage, CV_16SC3);
+        // 12-bit linear planes leave headroom for signed pyramid arithmetic.
+        projectedImages[i].convertTo(shortImage, CV_16SC3, 4095.0 / 65535.0);
         blender.feed(shortImage, seam, cv::Point());
         cv::Mat soft;
         cv::GaussianBlur(seam, soft, cv::Size(11, 11), 1.6);
@@ -535,14 +522,14 @@ static BlendPlan BuildBlendPlan(
     }
     cv::Mat multiband, blendedMask;
     blender.blend(multiband, blendedMask);
-    multiband.convertTo(plan.multibandPreview, CV_32FC3);
+    multiband.convertTo(plan.multibandPreview, CV_32FC3, 1.0 / 4095.0);
     plan.multibandMask = std::move(blendedMask);
     return plan;
 }
 
 static cv::Mat LowFrequencyCorrectionFromRenderedImage(
     const BlendPlan &plan,
-    const uint8_t *pixels,
+    const uint16_t *pixels,
     int outputW,
     int outputH,
     const cv::Rect2d &cropWorld,
@@ -552,39 +539,44 @@ static cv::Mat LowFrequencyCorrectionFromRenderedImage(
 ) {
     const int previewW = plan.multibandPreview.cols;
     const int previewH = plan.multibandPreview.rows;
-    cv::Mat difference(previewH, previewW, CV_32FC3, cv::Scalar());
+    cv::Mat difference(previewH, previewW, CV_32F, cv::Scalar());
     cv::Mat valid(previewH, previewW, CV_32F, cv::Scalar());
     const double sampleSpanX = scaleX / plan.scale;
     const double sampleSpanY = scaleY / plan.scale;
     for (int y = 0; y < previewH; ++y) {
-        const double worldY = globalBounds.y + y / plan.scale;
-        const double centerY = (worldY - cropWorld.y) * scaleY;
+        const double worldY = globalBounds.y + (y + 0.5) / plan.scale;
+        const double centerY = (worldY - cropWorld.y) * scaleY - 0.5;
         if (centerY < 0 || centerY >= outputH) continue;
-        cv::Vec3f *differenceRow = difference.ptr<cv::Vec3f>(y);
+        float *differenceRow = difference.ptr<float>(y);
         float *validRow = valid.ptr<float>(y);
         for (int x = 0; x < previewW; ++x) {
             if (!plan.multibandMask.at<uint8_t>(y, x)) continue;
-            const double worldX = globalBounds.x + x / plan.scale;
-            const double centerX = (worldX - cropWorld.x) * scaleX;
+            const double worldX = globalBounds.x + (x + 0.5) / plan.scale;
+            const double centerX = (worldX - cropWorld.x) * scaleX - 0.5;
             if (centerX < 0 || centerX >= outputW) continue;
             cv::Vec3f baseline(0, 0, 0);
             for (int sy = 0; sy < 4; ++sy) {
                 const int outputY = std::clamp(
-                    static_cast<int>(std::floor(centerY + ((sy + 0.5) / 4.0 - 0.5) * sampleSpanY)),
+                    static_cast<int>(std::round(centerY + ((sy + 0.5) / 4.0 - 0.5) * sampleSpanY)),
                     0, outputH - 1
                 );
                 for (int sx = 0; sx < 4; ++sx) {
                     const int outputX = std::clamp(
-                        static_cast<int>(std::floor(centerX + ((sx + 0.5) / 4.0 - 0.5) * sampleSpanX)),
+                        static_cast<int>(std::round(centerX + ((sx + 0.5) / 4.0 - 0.5) * sampleSpanX)),
                         0, outputW - 1
                     );
-                    const uint8_t *pixel = pixels +
-                        (static_cast<size_t>(outputY) * outputW + outputX) * 4;
+                    const uint16_t *pixel = pixels +
+                        (static_cast<size_t>(outputY) * outputW + outputX) * 3;
                     baseline += cv::Vec3f(pixel[0], pixel[1], pixel[2]);
                 }
             }
-            baseline *= 1.0f / 16.0f;
-            differenceRow[x] = plan.multibandPreview.at<cv::Vec3f>(y, x) - baseline;
+            baseline *= 1.0f / (16.0f * 65535.0f);
+            const double baselineY = LinearLuminance(baseline);
+            const double referenceY = LinearLuminance(plan.multibandPreview.at<cv::Vec3f>(y, x));
+            if (baselineY < 0.005 || referenceY < 0.005) continue;
+            // Correct only residual exposure. Independent RGB offsets change
+            // wall color, while a bounded scalar preserves natural shading.
+            differenceRow[x] = static_cast<float>(std::clamp(std::log2(referenceY / baselineY), -0.25, 0.25));
             validRow[x] = 1;
         }
     }
@@ -592,11 +584,10 @@ static cv::Mat LowFrequencyCorrectionFromRenderedImage(
     cv::GaussianBlur(difference, smoothedDifference, cv::Size(), 3.0);
     cv::GaussianBlur(valid, smoothedValid, cv::Size(), 3.0);
     for (int y = 0; y < previewH; ++y) {
-        cv::Vec3f *row = smoothedDifference.ptr<cv::Vec3f>(y);
+        float *row = smoothedDifference.ptr<float>(y);
         const float *weightRow = smoothedValid.ptr<float>(y);
         for (int x = 0; x < previewW; ++x) {
-            if (weightRow[x] > 0.01f) row[x] *= 1.0f / weightRow[x];
-            else row[x] = cv::Vec3f();
+            row[x] = weightRow[x] > 0.01f ? std::exp2(row[x] / weightRow[x]) : 1;
         }
     }
     return smoothedDifference;
@@ -1040,7 +1031,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         const double scaleX = outputW / cropWorld.width;
         const double scaleY = outputH / cropWorld.height;
         const size_t pixelCount = static_cast<size_t>(outputW) * outputH;
-        const size_t colorBytes = pixelCount * 4;
+        const size_t colorBytes = pixelCount * 3 * sizeof(uint16_t);
         const size_t weightBytes = pixelCount * sizeof(uint16_t);
         NSDictionary *disk = [[NSFileManager defaultManager] attributesOfFileSystemForPath:NSTemporaryDirectory() error:nil];
         const unsigned long long freeBytes = [disk[NSFileSystemFreeSize] unsignedLongLongValue];
@@ -1055,7 +1046,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                         @"The temporary image buffer could not be created.", rejected);
             return nil;
         }
-        auto *pixels = static_cast<uint8_t *>(colorFile.bytes);
+        auto *linearPixels = static_cast<uint16_t *>(colorFile.bytes);
         auto *weights = static_cast<uint16_t *>(weightFile.bytes);
         stage = "seams and color";
         std::vector<double> exposureGains;
@@ -1066,7 +1057,7 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
             exposureGains = EstimateExposureGains(geometry, thumbnails, globalBounds, previewW, previewH, previewScale);
         }
         if (!Report(progress, 0.46, error)) return nil;
-        const BlendPlan blendPlan = BuildBlendPlan(geometry, thumbnails, exposureGains, globalBounds);
+        const BlendPlan blendPlan = BuildBlendPlan(geometry, thumbnails, exposureGains, globalBounds, reusePrepared);
         if (!Report(progress, 0.49, error)) return nil;
         std::vector<cv::Size> thumbnailSizes;
         thumbnailSizes.reserve(thumbnails.size());
@@ -1075,10 +1066,10 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         thumbnails.shrink_to_fit();
         if (!Report(progress, 0.50, error)) return nil;
 
-        const double seamStartX = (cropWorld.x - globalBounds.x) * blendPlan.scale;
-        const double seamStartY = (cropWorld.y - globalBounds.y) * blendPlan.scale;
         const double seamStepX = blendPlan.scale / scaleX;
         const double seamStepY = blendPlan.scale / scaleY;
+        const double seamStartX = (cropWorld.x - globalBounds.x) * blendPlan.scale + 0.5 * seamStepX - 0.5;
+        const double seamStartY = (cropWorld.y - globalBounds.y) * blendPlan.scale + 0.5 * seamStepY - 0.5;
         std::vector<double> seamColumns(outputW);
         for (int x = 0; x < outputW; ++x) {
             seamColumns[x] = seamStartX + x * seamStepX;
@@ -1106,22 +1097,13 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                                 @"A captured photo could not be decoded for export.", @[@(index)]);
                     return nil;
                 }
-                std::array<cv::Point2f, 4> sourceCorners = {
-                    cv::Point2f(0, 0),
-                    cv::Point2f(static_cast<float>(source.cols - 1), 0),
-                    cv::Point2f(static_cast<float>(source.cols - 1), static_cast<float>(source.rows - 1)),
-                    cv::Point2f(0, static_cast<float>(source.rows - 1))
-                };
-                std::array<cv::Point2f, 4> destinationCorners;
-                for (size_t j = 0; j < 4; ++j) {
-                    destinationCorners[j] = cv::Point2f(
-                        static_cast<float>((frame.worldCorners[j].x - cropWorld.x) * scaleX),
-                        static_cast<float>((frame.worldCorners[j].y - cropWorld.y) * scaleY)
-                    );
-                }
-                cv::Mat H = cv::getPerspectiveTransform(sourceCorners.data(), destinationCorners.data());
+                source = LinearImage(source, exposureGains[frameNumber]);
+                cv::Mat H = ProjectionTransform(frame, source.size(), cropWorld.tl(), scaleX, scaleY, reusePrepared);
                 cv::Mat inverseH = H.inv();
-                const cv::Rect2f imageBounds = Bounds(destinationCorners);
+                const cv::Rect2d imageBounds(
+                    (frame.worldBounds.x - cropWorld.x) * scaleX - 0.5,
+                    (frame.worldBounds.y - cropWorld.y) * scaleY - 0.5,
+                    frame.worldBounds.width * scaleX, frame.worldBounds.height * scaleY);
                 const int left = std::max(0, static_cast<int>(std::floor(imageBounds.x)));
                 const int top = std::max(0, static_cast<int>(std::floor(imageBounds.y)));
                 const int right = std::min(outputW, static_cast<int>(std::ceil(imageBounds.br().x)));
@@ -1131,7 +1113,6 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                 const double h20 = inverseH.at<double>(2, 0), h21 = inverseH.at<double>(2, 1), h22 = inverseH.at<double>(2, 2);
                 const double featherWidth = std::max(8.0, std::min(source.cols, source.rows) * 0.09);
                 const cv::Mat &seamWeight = blendPlan.seamWeights[frameNumber];
-                const auto colorLUT = LinearGainLUT(exposureGains[frameNumber]);
 
                 const int firstTileX = left / kTileSide * kTileSide;
                 const int firstTileY = top / kTileSide * kTileSide;
@@ -1155,9 +1136,9 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                         0, 1, -tileY,
                         0, 0, 1);
                     cv::warpPerspective(source, tile, translation * H, cv::Size(tileW, tileH),
-                                        cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
+                                        cv::INTER_LINEAR, cv::BORDER_REFLECT);
                     for (int y = tileTop; y < tileBottom; ++y) {
-                        const cv::Vec3b *row = tile.ptr<cv::Vec3b>(y - tileY);
+                        const cv::Vec<uint16_t, 3> *row = tile.ptr<cv::Vec<uint16_t, 3>>(y - tileY);
                         const double seamY = seamStartY + y * seamStepY;
                         for (int x = tileLeft; x < tileRight; ++x) {
                             const size_t offset = static_cast<size_t>(y) * outputW + x;
@@ -1181,21 +1162,10 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                                 (softMask ? softMask / 255.0 : 1.0 / 256.0), 1.0, 256.0
                             ));
                             const uint16_t total = previous + contribution;
-                            const cv::Vec3b &color = row[x - tileX];
-                            uint8_t *pixel = pixels + offset * 4;
-                            if (previous == 0) {
-                                for (int channel = 0; channel < 3; ++channel) {
-                                    pixel[channel] = colorLUT[color[channel]];
-                                }
-                                pixel[3] = 255;
-                            } else {
-                                for (int channel = 0; channel < 3; ++channel) {
-                                    const uint32_t corrected = colorLUT[color[channel]];
-                                    pixel[channel] = static_cast<uint8_t>(
-                                        (static_cast<uint32_t>(pixel[channel]) * previous +
-                                         corrected * contribution + total / 2) / total
-                                    );
-                                }
+                            const auto &color = row[x - tileX];
+                            uint16_t *pixel = linearPixels + offset * 3;
+                            for (int channel = 0; channel < 3; ++channel) {
+                                pixel[channel] = uw::BlendLinearSample(pixel[channel], color[channel], previous, contribution);
                             }
                             weights[offset] = total;
                         }
@@ -1218,8 +1188,11 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
         // Compare OpenCV's multiband preview with the actual weighted full-resolution
         // mosaic. This avoids applying a single-source correction twice at soft seams.
         const cv::Mat correctionMap = LowFrequencyCorrectionFromRenderedImage(
-            blendPlan, pixels, outputW, outputH, cropWorld, globalBounds, scaleX, scaleY
+            blendPlan, linearPixels, outputW, outputH, cropWorld, globalBounds, scaleX, scaleY
         );
+        // Compact the mapped linear buffer in order. No second full-size color
+        // allocation is required for the 8-bit Display P3 HEIF encoder.
+        auto *pixels = static_cast<uint8_t *>(colorFile.bytes);
         constexpr int kCorrectionRows = 128;
         for (int firstY = 0; firstY < outputH; firstY += kCorrectionRows) {
             const int rowCount = std::min(kCorrectionRows, outputH - firstY);
@@ -1233,18 +1206,9 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                            cv::BORDER_REPLICATE);
             for (int localY = 0; localY < rowCount; ++localY) {
                 const int y = firstY + localY;
-                const cv::Vec3f *correctionRow = correctionTile.ptr<cv::Vec3f>(localY);
-                for (int x = 0; x < outputW; ++x) {
-                    const size_t offset = static_cast<size_t>(y) * outputW + x;
-                    uint8_t *pixel = pixels + offset * 4;
-                    for (int channel = 0; channel < 3; ++channel) {
-                        pixel[channel] = static_cast<uint8_t>(std::clamp(
-                            static_cast<int>(std::round(pixel[channel] +
-                                std::clamp(correctionRow[x][channel], -40.0f, 40.0f))),
-                            0, 255
-                        ));
-                    }
-                }
+                const size_t rowOffset = static_cast<size_t>(y) * outputW;
+                uw::EncodeLinearRow(linearPixels + rowOffset * 3, pixels + rowOffset * 4,
+                                    correctionTile.ptr<float>(localY), outputW);
             }
             if (!Report(progress, 0.90 + 0.04 * (firstY + rowCount) / outputH, error)) return nil;
         }

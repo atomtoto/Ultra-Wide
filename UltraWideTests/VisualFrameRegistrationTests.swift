@@ -114,7 +114,7 @@ final class VisualFrameRegistrationTests: XCTestCase {
 
     func testSmallContourOffsetCannotPassOnHighOverallCorrelation() throws {
         let scene = RegistrationImage(try smoothScene())
-        for offset in [(3.0, 0.0), (0.0, -3.0), (2.5, 2.5)] {
+        for offset in [(1.0, 0.0), (0.0, -1.0), (3.0, 0.0), (0.0, -3.0), (2.5, 2.5)] {
             let incorrect = Homography3x3([1, 0, offset.0 / 480,
                                           0, 1, offset.1 / 640, 0, 0, 1])
             XCTAssertThrowsError(try VisionFrameRegistration.verify(homography: incorrect,
@@ -123,6 +123,19 @@ final class VisualFrameRegistrationTests: XCTestCase {
                     return XCTFail("Expected a contour displacement rejection, received \(error)")
                 }
             }
+        }
+    }
+
+    func testSmallIncorrectPriorIsRefinedInsteadOfAcceptingDisplacedContours() async throws {
+        let scene = RegistrationImage(try thumbnail(try fixture(), maximumSide: 600))
+        let prior = Homography3x3([1, 0, 1.5 / Double(scene.cgImage.width),
+                                   0, 1, 0, 0, 0, 1])
+        let result = try await VisionFrameRegistration().register(source: scene, reference: scene,
+                                                                  initialEstimate: prior)
+        for point in [CGPoint(x: 0.2, y: 0.2), CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.8, y: 0.8)] {
+            let aligned = try XCTUnwrap(result.homography.transform(point))
+            XCTAssertEqual(aligned.x, point.x, accuracy: 0.5 / Double(scene.cgImage.width))
+            XCTAssertEqual(aligned.y, point.y, accuracy: 0.5 / Double(scene.cgImage.height))
         }
     }
 
@@ -168,6 +181,24 @@ final class VisualFrameRegistrationTests: XCTestCase {
                                                               initialEstimate: .identity)
             XCTFail("A prior and one matching half must not bypass visual disagreement.")
         } catch is VisualRegistrationFailure { }
+    }
+
+    func testOnePixelLocalParallaxCannotBeHiddenByTheMatchingBackground() throws {
+        let scene = try smoothScene()
+        let original = try grayPixels(scene)
+        var distorted = original
+        for y in 0..<scene.height {
+            for x in scene.width / 2..<scene.width - 1 {
+                distorted[y * scene.width + x] = original[y * scene.width + x + 1]
+            }
+        }
+        XCTAssertThrowsError(try VisionFrameRegistration.verify(homography: .identity,
+            source: RegistrationImage(try image(width: scene.width, height: scene.height, pixels: distorted)),
+            reference: RegistrationImage(scene))) { error in
+            guard case VisualRegistrationFailure.inconsistentContent = error else {
+                return XCTFail("Expected local contour displacement rejection, received \(error)")
+            }
+        }
     }
 
     func testSingularMirroredAndHorizonGeometryIsRejectedBeforeContent() throws {

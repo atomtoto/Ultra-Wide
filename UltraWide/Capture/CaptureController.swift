@@ -657,9 +657,15 @@ final class CaptureController: ObservableObject {
                 hypot($0.1.yawDegrees, $0.1.pitchDegrees)
                     < hypot($1.1.yawDegrees, $1.1.pitchDegrees)
             })?.1.id else { throw CaptureError.retakeLimitReached }
-            let previousFraction = polygonsByFrame.map { polygons in
-                VisualSweepCoverage(polygons: saved.frames.compactMap { polygons[$0.id] }).fraction
+            let aligned = indexedFrames.compactMap { _, frame -> (UUID, [CGPoint])? in
+                guard let polygon = polygonsByFrame?[frame.id], VisualSweepCoverage.valid(polygon) else { return nil }
+                return (frame.id, polygon)
             }
+            let confirmed = polygonsByFrame.map { _ in VisualSweepCoverage(polygons: aligned.map(\.1)) }
+            let losses = confirmed.map {
+                Dictionary(uniqueKeysWithValues: zip(aligned.map(\.0), $0.exclusiveFractions))
+            }
+            let previousFraction = confirmed?.fraction
                 ?? CoverageTracker(plan: saved.plan, frames: indexedFrames.map(\.1)).fraction
             var preferred: (slotIndex: Int, fractionLoss: Double, qualityRank: Int)?
             let candidates = indexedFrames.filter { $0.1.id != anchor && !protectedIDs.contains($0.1.id) }
@@ -672,18 +678,22 @@ final class CaptureController: ObservableObject {
                 }
             for (slotIndex, frame) in candidates {
                 let remaining = indexedFrames.filter { $0.0 != slotIndex }.map(\.1)
-                let candidateTracker = CoverageTracker(plan: saved.plan, frames: remaining)
-                let projected = polygonsByFrame.map { polygons in
-                    remaining.compactMap { polygons[$0.id] }
+                let fractionLoss: Double
+                let remainsConnected: Bool
+                if let polygons = polygonsByFrame {
+                    fractionLoss = losses?[frame.id] ?? 0
+                    remainsConnected = projectedFramesRemainConnected(remaining.compactMap { polygons[$0.id] })
+                } else {
+                    let candidateTracker = CoverageTracker(plan: saved.plan, frames: remaining)
+                    fractionLoss = max(0, previousFraction - candidateTracker.fraction)
+                    remainsConnected = framesRemainConnected(candidateTracker.imageRects)
                 }
-                let fraction = projected.map { VisualSweepCoverage(polygons: $0).fraction }
-                    ?? candidateTracker.fraction
                 let option = (
                     slotIndex: slotIndex,
-                    fractionLoss: max(0, previousFraction - fraction),
+                    fractionLoss: fractionLoss,
                     qualityRank: frame.quality == .good ? 1 : 0
                 )
-                if projected.map(projectedFramesRemainConnected) ?? framesRemainConnected(candidateTracker.imageRects),
+                if remainsConnected,
                    preferred == nil || option.fractionLoss < preferred!.fractionLoss
                         || (option.fractionLoss == preferred!.fractionLoss
                             && option.qualityRank < preferred!.qualityRank) {
@@ -1069,7 +1079,7 @@ final class CaptureController: ObservableObject {
             let polygon = VisualSweepCoverage.footprint(ProgressiveSweepAssembler.predictedTransform(
                 reading, relativeTo: reference, alignment: alignment, plan: plan)),
             confirmed.polygons.contains(where: { VisualSweepCoverage.overlap($0, polygon) >= 0.2 }) else { return false }
-        return VisualSweepCoverage(polygons: confirmed.polygons + [polygon]).fraction - confirmed.fraction >= 0.0001
+        return confirmed.additionalFraction(from: polygon) >= 0.0001
     }
 
     private func scheduleAlignment(_ saved: CaptureSessionSnapshot) {

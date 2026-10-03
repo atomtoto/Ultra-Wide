@@ -164,6 +164,70 @@ final class ProgressiveSweepAssemblerTests: XCTestCase {
         XCTAssertEqual(sources, [264], "An unchanged failed reference graph must not repeat the same work.")
     }
 
+    func testDenseSweepRetiresRedundancyWhileKeepingUniqueCoverageAndAnchors() async throws {
+        let fixture = try ProgressiveFixture()
+        defer { fixture.remove() }
+        let plan = try makePlan()
+        let center = try fixture.frame(width: 240, height: 320)
+        let edge = try fixture.frame(width: 264, height: 352, yaw: 8)
+        let redundant = try (0..<58).map { _ in try fixture.frame(width: 240, height: 320) }
+        let frames = [center, edge] + redundant
+        let registration = CountingFrameRegistration(transforms: [
+            264: Homography3x3([1, 0, 0.1, 0, 1, 0, 0, 0, 1])
+        ])
+        let assembler = ProgressiveSweepAssembler(registration: registration)
+        let session = UUID()
+        let original = try await assembler.update(sessionID: session, plan: plan, frames: [center, edge])
+        let dense = try await assembler.update(sessionID: session, plan: plan, frames: frames)
+        XCTAssertEqual(dense.retainedFrameIDs.count, SweepFrameReducer.preferredFrameCount)
+        XCTAssertTrue(dense.retainedFrameIDs.contains(center.id))
+        XCTAssertTrue(dense.retainedFrameIDs.contains(edge.id), "A view extending the field must not be retired.")
+        XCTAssertTrue(dense.retainedFrameIDs.contains(try XCTUnwrap(frames.last).id))
+        XCTAssertEqual(dense.coverage.fraction, original.coverage.fraction, accuracy: 1e-10)
+        XCTAssertEqual(Set(dense.alignments.keys), dense.retainedFrameIDs)
+        let retained = frames.filter { dense.retainedFrameIDs.contains($0.id) }
+        let next = try await assembler.update(sessionID: session, plan: plan, frames: retained)
+        XCTAssertEqual(next.coverage.fraction, dense.coverage.fraction, accuracy: 1e-10)
+        let attempts = await registration.registeredSourceWidths()
+        XCTAssertEqual(attempts.count, frames.count - 1, "Retained views must reuse their verified alignments.")
+    }
+
+    func testIncrementalPreviewMatchesFreshRenderingAndClearsRemovedFootprints() async throws {
+        let fixture = try ProgressiveFixture()
+        defer { fixture.remove() }
+        let plan = try makePlan()
+        let center = try fixture.frame(width: 240, height: 320)
+        let right = try fixture.frame(width: 264, height: 352, yaw: 16)
+        let transforms = [264: Homography3x3([1, 0, 0.45, 0, 1, 0, 0, 0, 1])]
+        let assembler = ProgressiveSweepAssembler(registration: CountingFrameRegistration(transforms: transforms))
+        let session = UUID()
+        let first = try await assembler.update(sessionID: session, plan: plan, frames: [center])
+        let repeated = try await assembler.update(sessionID: session, plan: plan, frames: [center])
+        XCTAssertTrue(first.preview === repeated.preview, "An unchanged sweep should reuse its rendered preview.")
+        let appended = try await assembler.update(sessionID: session, plan: plan, frames: [center, right])
+        let fresh = try await ProgressiveSweepAssembler(registration: CountingFrameRegistration(transforms: transforms))
+            .update(sessionID: UUID(), plan: plan, frames: [center, right])
+        // Compare in the preview's actual output space. Converting saturated
+        // P3 colors to device RGB can amplify a one-level rounding difference.
+        let outputSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.displayP3))
+        let incrementalPixels = try RGBAImage(XCTUnwrap(appended.preview), colorSpace: outputSpace)
+        let freshPixels = try RGBAImage(XCTUnwrap(fresh.preview), colorSpace: outputSpace)
+        let differences = zip(incrementalPixels.pixels, freshPixels.pixels).map { abs(Int($0) - Int($1)) }
+        let largestDifference = differences.max() ?? 0
+        let offset = differences.firstIndex(of: largestDifference) ?? 0
+        XCTAssertLessThanOrEqual(largestDifference, 3,
+            "Caching must preserve colors, alpha, and softened seams: x=\((offset / 4) % incrementalPixels.width), "
+            + "y=\((offset / 4) / incrementalPixels.width), channel=\(offset % 4), "
+            + "cached=\(incrementalPixels.pixels[offset]), fresh=\(freshPixels.pixels[offset]).")
+        let removed = try await assembler.update(sessionID: session, plan: plan, frames: [center])
+        let removedPixels = try RGBAImage(XCTUnwrap(removed.preview), colorSpace: outputSpace)
+        let firstPixels = try RGBAImage(XCTUnwrap(first.preview), colorSpace: outputSpace)
+        XCTAssertTrue(removedPixels.pixels == firstPixels.pixels, "A retired view must not remain in the cached composite.")
+        let x = Int(Double(incrementalPixels.width) * 0.85)
+        XCTAssertGreaterThan(incrementalPixels.pixel(x: x, y: 280).alpha, 240)
+        XCTAssertEqual(removedPixels.pixel(x: x, y: 280).alpha, 0)
+    }
+
     func testRejectedViewIsNotRetriedWhenOnlyDistantReferencesChange() async throws {
         let fixture = try ProgressiveFixture()
         defer { fixture.remove() }

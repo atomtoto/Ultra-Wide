@@ -37,6 +37,46 @@ final class VisualSweepCoverageTests: XCTestCase {
         XCTAssertEqual(coverage.fraction, 0.28 / targetArea, accuracy: 1e-10)
     }
 
+    func testExclusiveCoverageKeepsOwnerIndicesAcrossClippedAndRedundantViews() {
+        let coverage = VisualSweepCoverage(polygons: [
+            rectangle(x: 2, y: 2, width: 0.2, height: 0.2),
+            rectangle(x: 0, y: 0, width: 0.6, height: 0.5),
+            rectangle(x: 0.4, y: 0.2, width: 0.6, height: 0.5),
+            rectangle(x: 0.1, y: 0.1, width: 0.1, height: 0.1)
+        ])
+        let expected = [0, 0.23 / targetArea, 0.24 / targetArea, 0]
+        XCTAssertEqual(coverage.exclusiveFractions.count, expected.count)
+        for (actual, expected) in zip(coverage.exclusiveFractions, expected) {
+            XCTAssertEqual(actual, expected, accuracy: 1e-10)
+        }
+    }
+
+    func testDenseTiltedSweepExclusiveAreasMatchEveryActualRemoval() {
+        let polygons = (0..<40).map { index -> [CGPoint] in
+            let angle = Double(index % 9 - 4) * 0.03
+            let x = Double(index % 8) * 0.09 - 0.08
+            let y = Double(index / 8) * 0.15 - 0.05
+            return rectangle(x: 0, y: 0, width: 0.43, height: 0.47).map {
+                CGPoint(x: $0.x * cos(angle) - $0.y * sin(angle) + x,
+                        y: $0.x * sin(angle) + $0.y * cos(angle) + y)
+            }
+        }
+        let coverage = VisualSweepCoverage(polygons: polygons)
+        for index in polygons.indices {
+            let remaining = polygons.enumerated().filter { $0.offset != index }.map(\.element)
+            let actualLoss = coverage.fraction - VisualSweepCoverage(polygons: remaining).fraction
+            XCTAssertEqual(coverage.exclusiveFractions[index], actualLoss, accuracy: 1e-10,
+                "Retirement must preserve the exact union, including tilted intersections and overscan.")
+        }
+        for candidate in [rectangle(x: -0.05, y: -0.05, width: 1.1, height: 1.1),
+                          diamond(center: CGPoint(x: 0.8, y: 0.85), radius: 0.25), polygons[12],
+                          rectangle(x: 2, y: 2, width: 0.2, height: 0.2)] {
+            let expected = VisualSweepCoverage(polygons: polygons + [candidate]).fraction - coverage.fraction
+            XCTAssertEqual(coverage.additionalFraction(from: candidate), expected, accuracy: 1e-10,
+                "Selecting a new view must preserve the same exact coverage gain.")
+        }
+    }
+
     func testNarrowUncoveredSeamDoesNotFinishCapture() {
         let seamWidth = 0.0001
         let coverage = VisualSweepCoverage(polygons: [

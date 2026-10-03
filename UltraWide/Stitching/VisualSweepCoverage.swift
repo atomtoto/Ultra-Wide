@@ -7,14 +7,19 @@ struct VisualSweepCoverage: Sendable, Equatable {
     let polygons: [[CGPoint]]
     let fraction: Double
     let isComplete: Bool
+    /// Coverage lost by removing each polygon, computed together with the
+    /// union instead of rebuilding it once for every retirement candidate.
+    let exclusiveFractions: [Double]
     static let overscan = 0.025
 
     init(polygons: [[CGPoint]]) {
         self.polygons = polygons.filter { Self.valid($0) }
         let target = CGRect(x: -Self.overscan, y: -Self.overscan,
                             width: 1 + 2 * Self.overscan, height: 1 + 2 * Self.overscan)
-        let clipped = self.polygons.map { Self.clip($0, to: target) }.filter { $0.count >= 3 }
-        fraction = min(1, max(0, Self.unionArea(clipped) / Double(target.width * target.height)))
+        let areas = Self.unionAreas(self.polygons.map { Self.clip($0, to: target) })
+        let targetArea = Double(target.width * target.height)
+        fraction = min(1, max(0, areas.total / targetArea))
+        exclusiveFractions = areas.exclusive.map { max(0, $0 / targetArea) }
         // Exact polygon union includes roll and perspective. A tiny numerical
         // tolerance avoids floating point noise without accepting missing edges.
         isComplete = self.polygons.count >= 2 && fraction >= CaptureCoverage.completionThreshold
@@ -35,16 +40,37 @@ struct VisualSweepCoverage: Sendable, Equatable {
     func contains(_ rect: CGRect) -> Bool {
         guard rect.width > 0, rect.height > 0 else { return false }
         let clipped = polygons.map { Self.clip($0, to: rect) }.filter { $0.count >= 3 }
-        return Self.unionArea(clipped) / Double(rect.width * rect.height) >= CaptureCoverage.completionThreshold
+        return Self.unionAreas(clipped).total / Double(rect.width * rect.height) >= CaptureCoverage.completionThreshold
+    }
+
+    /// Check a candidate against only the part of its footprint not already
+    /// covered. The motion callback must not rebuild a dense sweep's union.
+    func additionalFraction(from polygon: [CGPoint]) -> Double {
+        guard Self.valid(polygon) else { return 0 }
+        let o = Self.overscan
+        let target = CGRect(x: -o, y: -o, width: 1 + 2 * o, height: 1 + 2 * o)
+        let clipped = Self.clip(polygon, to: target)
+        guard Self.area(clipped) > 0 else { return 0 }
+        let remaining = Self.uncoveredRegions(in: clipped, coveredBy: polygons)
+        return remaining.reduce(0) { $0 + Self.area($1) } / Double(target.width * target.height)
     }
 
     /// Exact fallback for small holes or missing overscan that fall between
     /// guidance grid samples. Each subtraction leaves convex uncovered pieces.
     func uncoveredPoints() -> [CGPoint] {
         let o = Self.overscan
-        var remaining = [[CGPoint(x: -o, y: -o), CGPoint(x: 1 + o, y: -o),
-                          CGPoint(x: 1 + o, y: 1 + o), CGPoint(x: -o, y: 1 + o)]]
+        let target = [CGPoint(x: -o, y: -o), CGPoint(x: 1 + o, y: -o),
+                      CGPoint(x: 1 + o, y: 1 + o), CGPoint(x: -o, y: 1 + o)]
+        return Self.uncoveredRegions(in: target, coveredBy: polygons).map { polygon in
+            CGPoint(x: polygon.reduce(0) { $0 + $1.x } / CGFloat(polygon.count),
+                    y: polygon.reduce(0) { $0 + $1.y } / CGFloat(polygon.count))
+        }
+    }
+
+    private static func uncoveredRegions(in target: [CGPoint], coveredBy polygons: [[CGPoint]]) -> [[CGPoint]] {
+        var remaining = [target]
         for polygon in polygons {
+            if remaining.isEmpty { break }
             let signedArea = polygon.indices.reduce(CGFloat.zero) { sum, index in
                 let a = polygon[index], b = polygon[(index + 1) % polygon.count]
                 return sum + a.x * b.y - b.x * a.y
@@ -67,10 +93,7 @@ struct VisualSweepCoverage: Sendable, Equatable {
             }
             remaining = next
         }
-        return remaining.map { polygon in
-            CGPoint(x: polygon.reduce(0) { $0 + $1.x } / CGFloat(polygon.count),
-                    y: polygon.reduce(0) { $0 + $1.y } / CGFloat(polygon.count))
-        }
+        return remaining
     }
 
     static func valid(_ polygon: [CGPoint]) -> Bool {
@@ -145,16 +168,19 @@ struct VisualSweepCoverage: Sendable, Equatable {
     /// Horizontal intervals change order only at vertices or intersecting
     /// polygon edges. Their union is linear in each resulting band, so its
     /// midpoint integrates the exact area, including narrow uncovered seams.
-    private static func unionArea(_ polygons: [[CGPoint]]) -> Double {
-        let edges = polygons.flatMap { polygon in
-            polygon.indices.map { (polygon[$0], polygon[($0 + 1) % polygon.count]) }
+    private static func unionAreas(_ polygons: [[CGPoint]]) -> (total: Double, exclusive: [Double]) {
+        let edges = polygons.enumerated().flatMap { owner, polygon in
+            polygon.indices.map { (a: polygon[$0], b: polygon[($0 + 1) % polygon.count], owner: owner) }
         }
         var levels = polygons.flatMap { $0.map(\.y) }
         for i in edges.indices {
-            let (a, b) = edges[i]
+            let (a, b, owner) = edges[i]
             let dx = b.x - a.x, dy = b.y - a.y
-            for j in edges.indices where j > i {
-                let (c, d) = edges[j]
+            for j in (i + 1)..<edges.count {
+                let (c, d, otherOwner) = edges[j]
+                guard owner != otherOwner,
+                      max(min(a.y, b.y), min(c.y, d.y)) < min(max(a.y, b.y), max(c.y, d.y)),
+                      max(min(a.x, b.x), min(c.x, d.x)) <= min(max(a.x, b.x), max(c.x, d.x)) else { continue }
                 let ex = d.x - c.x, ey = d.y - c.y
                 let determinant = dx * ey - dy * ex
                 guard abs(determinant) > 1e-12 else { continue }
@@ -164,34 +190,43 @@ struct VisualSweepCoverage: Sendable, Equatable {
             }
         }
         levels = Array(Set(levels)).sorted()
-        guard levels.count >= 2 else { return 0 }
+        var exclusive = [Double](repeating: 0, count: polygons.count)
+        guard levels.count >= 2 else { return (0, exclusive) }
         var result = 0.0
+        var endpoints: [(x: CGFloat, owner: Int, delta: Int)] = []
+        endpoints.reserveCapacity(polygons.count * 2)
         for index in 0..<(levels.count - 1) {
             let lower = levels[index], upper = levels[index + 1]
             guard upper - lower > 1e-12 else { continue }
             let mid = (lower + upper) / 2
-            let intervals: [(CGFloat, CGFloat)] = polygons.compactMap { polygon in
-                var xs: [CGFloat] = []
+            endpoints.removeAll(keepingCapacity: true)
+            for (owner, polygon) in polygons.enumerated() {
+                var start = CGFloat.infinity, end = -CGFloat.infinity
                 for edge in polygon.indices {
                     let a = polygon[edge], b = polygon[(edge + 1) % polygon.count]
                     if min(a.y, b.y) <= mid && max(a.y, b.y) > mid {
-                        xs.append(a.x + (b.x - a.x) * (mid - a.y) / (b.y - a.y))
+                        let x = a.x + (b.x - a.x) * (mid - a.y) / (b.y - a.y)
+                        start = min(start, x); end = max(end, x)
                     }
                 }
-                guard let start = xs.min(), let end = xs.max() else { return nil }
-                return (start, end)
-            }.sorted { $0.0 < $1.0 }
-            var left: CGFloat?, right: CGFloat = 0, width: CGFloat = 0
-            for (start, end) in intervals {
-                if let previous = left, start > right {
-                    width += right - previous
-                    left = start; right = end
-                } else if left != nil { right = max(right, end) }
-                else { left = start; right = end }
+                guard end > start else { continue }
+                endpoints.append((start, owner, 1))
+                endpoints.append((end, owner, -1))
             }
-            if let left { width += right - left }
-            result += Double(width * (upper - lower))
+            endpoints.sort { $0.x < $1.x }
+            var previousX = endpoints.first?.x ?? 0
+            var activeCount = 0, activeOwner = 0
+            for endpoint in endpoints {
+                let area = Double((endpoint.x - previousX) * (upper - lower))
+                if activeCount > 0 { result += area }
+                if activeCount == 1 { exclusive[activeOwner] += area }
+                // Each convex polygon contributes exactly one interval. XOR
+                // identifies its owner when the active count returns to one.
+                activeCount += endpoint.delta
+                activeOwner ^= endpoint.owner
+                previousX = endpoint.x
+            }
         }
-        return result
+        return (result, exclusive)
     }
 }

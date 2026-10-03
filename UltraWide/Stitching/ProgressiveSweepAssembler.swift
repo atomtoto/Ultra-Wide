@@ -59,6 +59,10 @@ actor ProgressiveSweepAssembler: SweepAssembling {
     private var rejected: Set<UUID> = []
     private var insufficientDetail: Set<UUID> = []
     private var failedReferences: [UUID: Set<UUID>] = [:]
+    private var previewPlan: CapturePlan?
+    private var previewFrameIDs: [UUID] = []
+    private var previewImage: CGImage?
+    private var previewLinearImage: CIImage?
     // Display P3 uses the sRGB transfer curve. Apply exposure to linear light,
     // then let Core Image encode the output preview into Display P3.
     private let imageContext = CIContext(options: [
@@ -75,6 +79,7 @@ actor ProgressiveSweepAssembler: SweepAssembling {
             self.sessionID = sessionID
             views.removeAll(); rejected.removeAll(); failedReferences.removeAll(); insufficientDetail.removeAll()
             decoded.removeAll()
+            previewPlan = nil; previewFrameIDs.removeAll(); previewImage = nil; previewLinearImage = nil
         }
         let currentIDs = Set(frames.map(\.id))
         views = views.filter { currentIDs.contains($0.key) }
@@ -244,14 +249,15 @@ actor ProgressiveSweepAssembler: SweepAssembling {
         // confirmed redundant views may be retired while acquiring images.
         var kept = frames
         while kept.count > SweepFrameReducer.preferredFrameCount {
-            let coverage = VisualSweepCoverage(polygons: kept.compactMap { views[$0.id]?.polygon }).fraction
+            let aligned = kept.compactMap { views[$0.id] }
+            let coverage = VisualSweepCoverage(polygons: aligned.map(\.polygon))
             var removed = false
-            for index in kept.indices where kept[index].id != anchor && kept[index].id != frames.last?.id {
-                guard views[kept[index].id] != nil else { continue }
-                let remaining = kept.enumerated().filter { $0.offset != index }.map(\.element)
+            for (view, loss) in zip(aligned, coverage.exclusiveFractions)
+                where view.frame.id != anchor && view.frame.id != frames.last?.id {
+                guard loss <= 1e-10 else { continue }
+                let remaining = kept.filter { $0.id != view.frame.id }
                 let polygons = remaining.compactMap { views[$0.id]?.polygon }
-                guard VisualSweepCoverage(polygons: polygons).fraction + 1e-10 >= coverage,
-                      Self.connected(polygons) else { continue }
+                guard Self.connected(polygons) else { continue }
                 kept = remaining; removed = true; break
             }
             if !removed { break }
@@ -289,14 +295,26 @@ actor ProgressiveSweepAssembler: SweepAssembling {
     }
 
     private func render(_ aligned: [View], plan: CapturePlan) -> CGImage? {
-        guard !aligned.isEmpty else { return nil }
+        guard !aligned.isEmpty else {
+            previewPlan = nil; previewFrameIDs.removeAll(); previewImage = nil; previewLinearImage = nil
+            return nil
+        }
         let height = plan.orientation.isPortrait ? 560.0 : 420.0
         let width = plan.orientation.isPortrait ? 420.0 : 560.0
         let canvas = CGRect(x: 0, y: 0, width: width, height: height)
-        var composite = CIImage(color: .clear).cropped(to: canvas)
+        let frameIDs = aligned.map { $0.frame.id }
+        let canAppend = previewPlan == plan && previewLinearImage != nil && previewImage != nil
+            && frameIDs.starts(with: previewFrameIDs)
+        if canAppend, frameIDs.count == previewFrameIDs.count { return previewImage }
+        // Materialize the previous composite so each addition has a bounded
+        // filter graph. Removal, reordering or a new canvas rebuilds the image
+        // to avoid leaving retired footprints visible in the preview.
+        let previous = canAppend ? previewLinearImage : nil
+        var composite = previous ?? CIImage(color: .clear).cropped(to: canvas)
+        let start = canAppend ? previewFrameIDs.count : 0
         let corners = [CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0),
                        CGPoint(x: 1, y: 1), CGPoint(x: 0, y: 1)]
-        for view in aligned {
+        for view in aligned.dropFirst(start) {
             let projected = corners.compactMap { view.transform.transform($0) }
             guard projected.count == 4 else { continue }
             func vector(_ point: CGPoint) -> CIVector {
@@ -324,8 +342,20 @@ actor ProgressiveSweepAssembler: SweepAssembling {
             ])
             composite = image.cropped(to: canvas).composited(over: composite)
         }
-        return imageContext.createCGImage(composite, from: canvas, format: .RGBA8,
+        // Preserve the working linear-light values, including negative color
+        // components. A CGImage round trip can clip them or quantize alpha.
+        let rowBytes = Int(width) * 4 * MemoryLayout<UInt16>.size
+        var bitmap = Data(count: rowBytes * Int(height))
+        bitmap.withUnsafeMutableBytes { bytes in
+            imageContext.render(composite, toBitmap: bytes.baseAddress!, rowBytes: rowBytes,
+                bounds: canvas, format: .RGBAh, colorSpace: nil)
+        }
+        let flattened = CIImage(bitmapData: bitmap, bytesPerRow: rowBytes, size: canvas.size,
+            format: .RGBAh, colorSpace: nil)
+        let image = imageContext.createCGImage(flattened, from: canvas, format: .RGBA8,
             colorSpace: CGColorSpace(name: CGColorSpace.displayP3))
+        previewPlan = plan; previewFrameIDs = frameIDs; previewImage = image; previewLinearImage = flattened
+        return image
     }
 }
 

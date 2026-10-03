@@ -17,6 +17,7 @@
 #include <vector>
 #include "UWBlendSampling.hpp"
 #include "UWParallelRender.hpp"
+#include "UWRenderSupport.hpp"
 #endif
 
 #import "UWStitcher.h"
@@ -1141,6 +1142,13 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                     const int tileY = firstTileY + static_cast<int>(tileIndex / tileColumns) * kTileSide;
                     const int tileW = std::min(kTileSide, outputW - tileX);
                     const int tileH = std::min(kTileSide, outputH - tileY);
+                    const int tileLeft = std::max(left, tileX), tileTop = std::max(top, tileY);
+                    const int tileRight = std::min(right, tileX + tileW), tileBottom = std::min(bottom, tileY + tileH);
+                    if (tileRight <= tileLeft || tileBottom <= tileTop) return;
+                    if (!uw::MaskRegionHasWeight(seamWeight.ptr<uint8_t>(), seamWeight.cols, seamWeight.rows,
+                            seamWeight.step, seamColumns[tileLeft], seamStartY + tileTop * seamStepY,
+                            seamColumns[tileRight - 1], seamStartY + (tileBottom - 1) * seamStepY)
+                        && !uw::HasUncoveredPixel(weights, outputW, tileLeft, tileTop, tileRight, tileBottom)) return;
                     cv::Mat tile;
                     cv::Mat translation = (cv::Mat_<double>(3, 3) <<
                         1, 0, -tileX,
@@ -1148,10 +1156,17 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                         0, 0, 1);
                     cv::warpPerspective(source, tile, translation * H, cv::Size(tileW, tileH),
                                         cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar());
-                    for (int y = std::max(top, tileY); y < std::min(bottom, tileY + tileH); ++y) {
+                    for (int y = tileTop; y < tileBottom; ++y) {
                         const cv::Vec3b *row = tile.ptr<cv::Vec3b>(y - tileY);
                         const double seamY = seamStartY + y * seamStepY;
-                        for (int x = std::max(left, tileX); x < std::min(right, tileX + tileW); ++x) {
+                        for (int x = tileLeft; x < tileRight; ++x) {
+                            const size_t offset = static_cast<size_t>(y) * outputW + x;
+                            const uint16_t previous = weights[offset];
+                            // Sample the soft seam continuously in both axes
+                            // before doing projection work for this pixel.
+                            const double softMask = uw::BilinearMaskWeight(seamWeight.ptr<uint8_t>(),
+                                seamWeight.cols, seamWeight.rows, seamWeight.step, seamColumns[x], seamY);
+                            if (!softMask && previous) continue;
                             const double denominator = h20 * x + h21 * y + h22;
                             if (std::abs(denominator) < 1e-8) continue;
                             const double sourceX = (h00 * x + h01 * y + h02) / denominator;
@@ -1161,15 +1176,6 @@ static bool EncodeHEIF(const uint8_t *bytes, int width, int height, NSURL *url) 
                             const double edge = std::min({sourceX, sourceY,
                                                           source.cols - 1.0 - sourceX,
                                                           source.rows - 1.0 - sourceY});
-                            const size_t offset = static_cast<size_t>(y) * outputW + x;
-                            const uint16_t previous = weights[offset];
-                            // Nearest-neighbor enlargement of a tiny seam
-                            // mask creates rectangular steps on straight
-                            // edges. Sample the soft mask continuously in
-                            // both axes at the actual output pixel.
-                            const double softMask = uw::BilinearMaskWeight(seamWeight.ptr<uint8_t>(),
-                                seamWeight.cols, seamWeight.rows, seamWeight.step, seamColumns[x], seamY);
-                            if (!softMask && previous) continue;
                             const uint16_t contribution = static_cast<uint16_t>(std::clamp(
                                 256.0 * edge / featherWidth *
                                 (softMask ? softMask / 255.0 : 1.0 / 256.0), 1.0, 256.0

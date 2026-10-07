@@ -15,32 +15,22 @@ final class CaptureUIModel {
     /// Upright, screen-sized thumbnail of the central reference photo.
     var reanchorImage: UIImage?
 
-    var selectedLens: CaptureUILens = .wide
-    var availableLenses: [CaptureUILens] = [.wide]
-    var selectedTarget: CaptureUITarget = .half
-    var availableTargets: [CaptureUITarget] = [.half]
+    var selectedLens: CaptureLens = .wide
+    var availableLenses: [CaptureLens] = [.wide]
+    var selectedTarget: CaptureTarget = .half
+    var availableTargets: [CaptureTarget] = [.half]
     var selectedLighting: CaptureLighting = .saved()
     var isSinglePhoto = false
-    var estimatedPhotos = 9
     var isStarting = false
     var canAdjustCamera = false
     var exposureBias: Double = 0
 
-    var currentPass = 1
-    var capturedPhotos = 0
-    var plannedPhotos = 0
-    var maximumPhotos = 30
-    var refinementPhotos = 0
-    var maximumRefinementPhotos = 6
-    var remainingRetakes = 6
-    var guidance = CaptureUIGuidance()
-    var coverage: [CaptureUICoverageCell] = []
     /// Angles normalized into the desired final field of view. Updated by the
     /// continuous sweep pipeline and rendered without exposing capture slots.
     var sweep = CaptureUISweep()
-    var canCapture = false
-    var canFinishPass = false
-    var canRefine = false
+    /// Increases each time verified coverage grows noticeably. The view plays
+    /// a selection haptic on change, when the photographer enabled haptics.
+    var coverageFeedbackCount = 0
 
     var processingProgress: Double?
     var resultPreview: UIImage?
@@ -51,7 +41,8 @@ final class CaptureUIModel {
     var saveState: CaptureUISaveState = .idle
 
     var issue: CaptureUIIssue?
-    var banner: CaptureUIMessage?
+    /// Already localized guidance, such as an orientation correction.
+    var banner: String?
     /// A capture already owns its lens and target, including while resuming.
     var hasActiveSession = false
     var hasRecoverableSession = false
@@ -74,12 +65,7 @@ final class CaptureUIModel {
             exposureBias = min(2, max(-2, bias))
         case .setMeteringPoint:
             guard canAdjustCamera, !isStarting else { return }
-        case .start, .startSweep, .resume, .retry, .confirmReanchor:
-            isStarting = true
-        case .finishPass:
-            canFinishPass = false
-        case .beginRefinementPass:
-            canRefine = false
+        case .startSweep, .resume, .retry, .confirmReanchor:
             isStarting = true
         case .assemble, .useCapturedField:
             phase = .processing
@@ -100,50 +86,9 @@ enum CaptureUIPhase: Equatable {
     case unavailable
 }
 
-enum CaptureUILens: String, CaseIterable, Identifiable, Equatable {
-    case wide
-    case tele
-
-    var id: String { rawValue }
-}
-
-enum CaptureUITarget: String, CaseIterable, Identifiable, Equatable {
-    case half
-    case threeQuarters
-    case one
-    case onePointFive
-    case two
-
-    var id: String { rawValue }
-
-    func magnification(for locale: Locale) -> String {
-        let separator = locale.captureLanguageIsFrench ? "," : "."
-        return switch self {
-        case .half: "0\(separator)5×"
-        case .threeQuarters: "0\(separator)75×"
-        case .one: "1×"
-        case .onePointFive: "1\(separator)5×"
-        case .two: "2×"
-        }
-    }
-}
-
-struct CaptureUIGuidance {
-    /// Target position relative to the center of the live preview, in -1...1.
-    var hasTarget = false
-    var horizontalOffset: Double = 0
-    var verticalOffset: Double = 0
-    var isAligned = false
-    var isStable = false
-    var isCapturing = false
-    var isAutoCaptureEnabled = true
-}
-
-struct CaptureUISweep {
+struct CaptureUISweep: Equatable {
     /// Current camera field of view inside the final field, in 0...1 units.
     var viewRect: CGRect = CGRect(x: 0.31, y: 0.31, width: 0.38, height: 0.38)
-    /// Regions already captured with usable overlap, in the same coordinates.
-    var coveredRects: [CGRect] = []
     /// Footprints whose image alignment has been checked, in 0...1 units.
     var coveredPolygons: [[CGPoint]] = []
     /// Progressive image assembled in the desired final field of view.
@@ -163,33 +108,10 @@ enum SweepCaptureBlockReason: Equatable, Sendable {
     case tooFast, tooDark, awaitingCamera, writing, insufficientDetail, alignmentFailed
 }
 
-struct CaptureUICoverageCell: Identifiable {
-    enum State: Equatable {
-        case pending
-        case current
-        case captured
-        case needsRetake
-    }
-
-    var id: String
-    var row: Int
-    var column: Int
-    var state: State
-}
-
 enum CaptureUISaveState: Equatable {
     case idle
     case saving
     case saved
-}
-
-struct CaptureUIMessage {
-    var french: String
-    var english: String
-
-    func text(for locale: Locale) -> String {
-        locale.captureLanguageIsFrench ? french : english
-    }
 }
 
 struct CaptureUIIssue {
@@ -204,39 +126,46 @@ struct CaptureUIIssue {
     }
 
     var kind: Kind
-    var detail: CaptureUIMessage?
+    /// Already localized explanation shown below the issue title.
+    var detail: String?
     var canRetry = false
 }
 
 enum CaptureUIAction {
     case prepare
-    case selectLens(CaptureUILens)
-    case selectTarget(CaptureUITarget)
+    case selectLens(CaptureLens)
+    case selectTarget(CaptureTarget)
     case selectLighting(CaptureLighting)
     case setMeteringPoint(CGPoint)
     case setExposureBias(Double)
-    case start
     case startSweep
     case stopSweep
     case resume
     case confirmReanchor
-    case capture
-    case finishPass
-    case beginRefinementPass
     case assemble
     case useCapturedField
     case continueAfterCrop
-    case retake(String)
     case pause
     case discard
-    case newCapture
     case saveToPhotos
     case retry
-    case openSettings
 }
 
-extension Locale {
-    var captureLanguageIsFrench: Bool {
-        language.languageCode?.identifier == "fr"
+extension CaptureLens {
+    var title: LocalizedStringResource {
+        switch self {
+        case .wide: "Main"
+        case .tele: "Tele"
+        }
+    }
+}
+
+extension CaptureLighting {
+    var title: LocalizedStringResource {
+        switch self {
+        case .automatic: "Auto (Region)"
+        case .hz50: "50 Hz"
+        case .hz60: "60 Hz"
+        }
     }
 }

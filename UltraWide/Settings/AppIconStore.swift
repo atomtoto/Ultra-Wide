@@ -11,11 +11,11 @@ enum AppIcon: String, CaseIterable, Identifiable {
     var alternateName: String? { self == .original ? nil : rawValue }
     var previewName: String { "\(rawValue)Preview" }
 
-    func title(for locale: Locale) -> String {
+    var title: LocalizedStringResource {
         switch self {
-        case .original: locale.captureLanguageIsFrench ? "Originale" : "Original"
-        case .amber: locale.captureLanguageIsFrench ? "Ambre" : "Amber"
-        case .aurora: locale.captureLanguageIsFrench ? "Aurore" : "Aurora"
+        case .original: "Original"
+        case .amber: "Amber"
+        case .aurora: "Aurora"
         case .graphite: "Graphite"
         }
     }

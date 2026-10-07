@@ -131,11 +131,11 @@
 			};
 			buildConfigurationList = A0000000000000000000000A /* Build configuration list for PBXProject "UltraWide" */;
 			compatibilityVersion = "Xcode 16.0";
-			developmentRegion = fr;
+			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
-				fr,
 				en,
+				fr,
 				Base,
 			);
 			mainGroup = A00000000000000000000002;
@@ -205,10 +205,12 @@
 				ENABLE_TESTABILITY = YES;
 				GCC_OPTIMIZATION_LEVEL = 0;
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
@@ -223,9 +225,11 @@
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				VALIDATE_PRODUCT = YES;
 			};
@@ -236,6 +240,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "UltraWideAmber UltraWideAurora UltraWideGraphite";
 				ASSETCATALOG_COMPILER_APPICON_NAME = UltraWide;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = RVBY9CDKL4;
@@ -246,8 +251,8 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Ultra Wide";
-				INFOPLIST_KEY_NSCameraUsageDescription = "Ultra Wide utilise la caméra pour assembler une photo grand-angle.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Ultra Wide enregistre votre photo assemblée dans Photos à votre demande.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Ultra Wide uses the camera to assemble a wide-angle photo.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Ultra Wide saves your assembled photo to Photos when you ask.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
@@ -274,6 +279,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_ALTERNATE_APPICON_NAMES = "UltraWideAmber UltraWideAurora UltraWideGraphite";
 				ASSETCATALOG_COMPILER_APPICON_NAME = UltraWide;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = RVBY9CDKL4;
@@ -284,8 +290,8 @@
 				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Ultra Wide";
-				INFOPLIST_KEY_NSCameraUsageDescription = "Ultra Wide utilise la caméra pour assembler une photo grand-angle.";
-				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Ultra Wide enregistre votre photo assemblée dans Photos à votre demande.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Ultra Wide uses the camera to assemble a wide-angle photo.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Ultra Wide saves your assembled photo to Photos when you ask.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";

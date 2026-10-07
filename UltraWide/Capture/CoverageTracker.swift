@@ -122,6 +122,24 @@ struct CoverageTracker {
         return fraction(adding: candidate) - filled >= (filled > 0.90 ? 0.0001 : 0.005)
     }
 
+    /// Motion footprints form one graph when each one shares at least 30% of
+    /// the smaller image with a neighbor, enough for feature matching.
+    static func isConnected(_ rects: [CGRect]) -> Bool {
+        guard !rects.isEmpty else { return true }
+        var visited: Set<Int> = [0], frontier = [0]
+        while let index = frontier.popLast() {
+            for other in rects.indices where !visited.contains(other) {
+                let intersection = rects[index].intersection(rects[other])
+                guard !intersection.isNull else { continue }
+                let smaller = min(rects[index].width * rects[index].height,
+                                  rects[other].width * rects[other].height)
+                guard smaller > 0, intersection.width * intersection.height / smaller >= 0.30 else { continue }
+                visited.insert(other); frontier.append(other)
+            }
+        }
+        return visited.count == rects.count
+    }
+
     mutating func include(yaw: Double, pitch: Double) {
         imageRects.append(footprint(yaw: yaw, pitch: pitch))
         cachedFraction = fraction(adding: nil)

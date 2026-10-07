@@ -26,7 +26,7 @@ enum SweepFrameReducer {
             for index in candidates {
                 let remaining = kept.enumerated().filter { $0.offset != index }.map(\.element)
                 let tracker = CoverageTracker(plan: plan, frames: remaining)
-                guard tracker.fraction + 1e-10 >= before, connected(tracker.imageRects) else { continue }
+                guard tracker.fraction + 1e-10 >= before, CoverageTracker.isConnected(tracker.imageRects) else { continue }
                 kept = remaining
                 retired = true
                 break
@@ -34,23 +34,5 @@ enum SweepFrameReducer {
             if !retired { break }
         }
         return kept
-    }
-
-    private static func connected(_ rects: [CGRect]) -> Bool {
-        guard !rects.isEmpty else { return true }
-        var visited: Set<Int> = [0]
-        var frontier = [0]
-        while let index = frontier.popLast() {
-            for other in rects.indices where !visited.contains(other) {
-                let intersection = rects[index].intersection(rects[other])
-                guard !intersection.isNull else { continue }
-                let smaller = min(rects[index].width * rects[index].height,
-                                  rects[other].width * rects[other].height)
-                guard smaller > 0, intersection.width * intersection.height / smaller >= 0.30 else { continue }
-                visited.insert(other)
-                frontier.append(other)
-            }
-        }
-        return visited.count == rects.count
     }
 }

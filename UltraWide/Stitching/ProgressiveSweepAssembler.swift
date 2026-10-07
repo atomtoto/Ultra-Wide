@@ -268,25 +268,12 @@ actor ProgressiveSweepAssembler: SweepAssembling {
                 guard loss <= 1e-10 else { continue }
                 let remaining = kept.filter { $0.id != view.frame.id }
                 let polygons = remaining.compactMap { views[$0.id]?.polygon }
-                guard Self.connected(polygons) else { continue }
+                guard VisualSweepCoverage.isConnected(polygons) else { continue }
                 kept = remaining; removed = true; break
             }
             if !removed { break }
         }
         return Set(kept.map(\.id))
-    }
-
-    private static func connected(_ polygons: [[CGPoint]]) -> Bool {
-        guard !polygons.isEmpty else { return true }
-        var visited: Set<Int> = [0], frontier = [0]
-        while let index = frontier.popLast() {
-            for other in polygons.indices where !visited.contains(other) {
-                if VisualSweepCoverage.overlap(polygons[index], polygons[other]) >= 0.15 {
-                    visited.insert(other); frontier.append(other)
-                }
-            }
-        }
-        return visited.count == polygons.count
     }
 
     private static func read(_ url: URL) -> (RegistrationImage, CGSize)? {

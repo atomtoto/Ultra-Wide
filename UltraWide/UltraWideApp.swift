@@ -5,13 +5,16 @@ import UIKit
 @main
 struct UltraWideApp: App {
     @State private var coordinator = UltraWideCoordinator()
+#if DEBUG
+    @State private var previewModel = Self.requestedPreviewModel()
+#endif
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
 #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains(where: { ["-ui-sweep-preview", "-ui-crop-preview", "-ui-review-preview", "-ui-camera-preview", "-ui-settings-preview"].contains($0) }) {
-                UltraWideRootView(model: Self.sweepPreviewModel())
+            if let previewModel {
+                UltraWideRootView(model: previewModel)
             } else {
                 liveView
             }
@@ -23,11 +26,6 @@ struct UltraWideApp: App {
 
     private var liveView: some View {
         UltraWideRootView(model: coordinator.ui)
-            .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
-                if scenePhase == .active && coordinator.ui.phase == .setup {
-                    coordinator.ui.send(.prepare)
-                }
-            }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
                     coordinator.ui.send(.prepare)
@@ -39,21 +37,26 @@ struct UltraWideApp: App {
 
 #if DEBUG
     /// Lets the simulator render the camera interface without rear-camera hardware.
-    private static func sweepPreviewModel() -> CaptureUIModel {
+    private static func requestedPreviewModel() -> CaptureUIModel? {
+        let args = ProcessInfo.processInfo.arguments
+        let previews = ["-ui-sweep-preview", "-ui-crop-preview", "-ui-review-preview",
+                        "-ui-camera-preview", "-ui-settings-preview", "-ui-exposure-preview"]
+        guard args.contains(where: previews.contains) else { return nil }
         let model = CaptureUIModel()
         model.phase = .capturing
         model.hasActiveSession = true
         model.sweep = CaptureUISweep(
             viewRect: CGRect(x: 0.45, y: 0.12, width: 0.40, height: 0.46),
-            coveredRects: [
-                CGRect(x: 0.18, y: 0.28, width: 0.43, height: 0.46),
-                CGRect(x: 0.36, y: 0.17, width: 0.43, height: 0.46)
+            coveredPolygons: [
+                [CGPoint(x: 0.18, y: 0.28), CGPoint(x: 0.61, y: 0.28),
+                 CGPoint(x: 0.61, y: 0.74), CGPoint(x: 0.18, y: 0.74)],
+                [CGPoint(x: 0.36, y: 0.17), CGPoint(x: 0.79, y: 0.17),
+                 CGPoint(x: 0.79, y: 0.63), CGPoint(x: 0.36, y: 0.63)]
             ],
             coverageFraction: 0.61,
-            isRecording: true
+            isRecording: true,
+            guidanceDirection: CGVector(dx: -0.4, dy: 0.35)
         )
-        model.sweep.guidanceDirection = CGVector(dx: -0.4, dy: 0.35)
-        let args = ProcessInfo.processInfo.arguments
         if args.contains("-ui-crop-preview") {
             let polygons = [[CGPoint(x: -0.1, y: -0.1), CGPoint(x: 0.96, y: -0.1),
                              CGPoint(x: 0.96, y: 1.1), CGPoint(x: -0.1, y: 1.1)],
@@ -62,24 +65,26 @@ struct UltraWideApp: App {
             let coverage = VisualSweepCoverage(polygons: polygons)
             model.phase = .passReview
             model.sweep.coveredPolygons = polygons
-            model.sweep.coveredRects = []
             model.sweep.coverageFraction = coverage.fraction
             model.sweep.isRecording = false
             model.sweep.capturedField = SweepCoverageAnalysis(coverage: coverage).capturedField?.rect
         }
-        if args.contains("-ui-camera-preview") || args.contains("-ui-settings-preview") {
+        if args.contains("-ui-camera-preview") || args.contains("-ui-settings-preview")
+            || args.contains("-ui-exposure-preview") {
             model.phase = .setup
             model.hasActiveSession = false
             model.previewSession = AVCaptureSession()
             model.canAdjustCamera = true
+            model.availableLenses = [.wide, .tele]
             model.availableTargets = [.half, .threeQuarters, .one, .onePointFive, .two]
         }
         if args.contains("-ui-review-preview") { configureReviewPreview(model) }
         model.onAction = { action in
             switch action {
             case .useCapturedField: configureReviewPreview(model); model.resultWasCropped = true; model.resultMagnification = 0.58
-            case .start, .startSweep, .continueAfterCrop: model.phase = .capturing; model.hasActiveSession = true; model.isStarting = false; model.canAdjustCamera = false
+            case .startSweep, .continueAfterCrop: model.phase = .capturing; model.hasActiveSession = true; model.isStarting = false; model.canAdjustCamera = false
             case .stopSweep: model.phase = .passReview; model.sweep.isRecording = false
+            case .saveToPhotos: model.saveState = .saved
             default: break
             }
         }

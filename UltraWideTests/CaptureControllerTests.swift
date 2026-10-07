@@ -537,12 +537,13 @@ final class CaptureControllerTests: XCTestCase {
         let capture = makeCaptureController(camera: camera, motion: motion, store: store)
         try await capture.preparePreview(lens: .wide, target: .half)
         try await capture.beginSweep()
-        let captured = expectation(description: "Useful soft exposure captured on first movement")
-        let subscription = capture.$slots.first { $0.count >= 2 }.sink { _ in captured.fulfill() }
         try await Task.sleep(for: .milliseconds(40))
         motion.emit(yaw: 8, roll: 15, speed: 1.8)
-        await fulfillment(of: [captured], timeout: 0.5)
-        subscription.cancel()
+        // The useful soft exposure must become durable on this first movement.
+        let deadline = ContinuousClock.now + .milliseconds(500)
+        while (capture.currentSnapshot?.frames.count ?? 0) < 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         XCTAssertEqual(capture.currentSnapshot?.frames.count, 2)
         XCTAssertEqual(capture.currentSnapshot?.frames.last?.rollDegrees, 15)
         XCTAssertFalse(capture.orientationNeedsCorrection)

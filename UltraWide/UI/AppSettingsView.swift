@@ -3,7 +3,6 @@ import SwiftUI
 struct AppSettingsView: View {
     @Bindable var model: CaptureUIModel
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.locale) private var locale
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppPreferences.gridKey) private var showsGrid = false
     @AppStorage(AppPreferences.hapticsKey) private var hapticsEnabled = true
@@ -20,59 +19,55 @@ struct AppSettingsView: View {
                             Text("\(resolution.rawValue) MP").tag(resolution.rawValue)
                         }
                     } label: {
-                        Label(tr("Résolution maximale", "Maximum resolution"), systemImage: "photo")
+                        Label("Maximum Resolution", systemImage: "photo")
                     }
                     .accessibilityIdentifier("outputResolution")
                 } header: {
-                    Text(tr("Image de sortie", "Output image"))
+                    Text("Output Image")
                 } footer: {
-                    Text(tr("S’applique aux prochaines prises de vue, pour Photos et le partage. Une résolution plus élevée peut allonger l’assemblage et augmenter la taille du fichier. Le résultat dépend des images source et de la mémoire de l’iPhone, sans agrandissement artificiel.",
-                            "Applies to future captures, for Photos and sharing. Higher resolutions can increase assembly time and file size. The result depends on source images and iPhone memory, without upscaling."))
+                    Text("Applies to future captures, for Photos and sharing. Higher resolutions can increase assembly time and file size. The result depends on source images and iPhone memory, without upscaling.")
                 }
                 Section {
                     Toggle(isOn: $showsGrid) {
-                        Label(tr("Grille de cadrage", "Composition grid"), systemImage: "grid")
+                        Label("Composition Grid", systemImage: "grid")
                     }
                     Toggle(isOn: $hapticsEnabled) {
-                        Label(tr("Retour haptique", "Haptic feedback"), systemImage: "waveform")
+                        Label("Haptic Feedback", systemImage: "waveform")
                     }
                 } header: {
-                    Text(tr("Prise de vue", "Capture"))
+                    Text("Capture")
                 } footer: {
-                    Text(tr("La grille aide à composer l’image. Les vibrations signalent les gains de couverture et la réussite d’une capture ou d’un enregistrement.",
-                            "The grid helps you compose your image. Haptics signal coverage gains and successful captures or saves."))
+                    Text("The grid helps you compose your image. Haptics signal coverage gains and successful captures or saves.")
                 }
                 Section {
                     Picker(selection: Binding(get: { model.selectedLighting },
                                               set: { model.send(.selectLighting($0)) })) {
                         ForEach(CaptureLighting.allCases) { lighting in
-                            Text(lightingTitle(lighting)).tag(lighting)
+                            Text(lighting.title).tag(lighting)
                         }
                     } label: {
-                        Label(tr("Éclairage", "Lighting"), systemImage: "lightbulb")
+                        Label("Lighting", systemImage: "lightbulb")
                     }
                     .disabled(model.phase != .setup || model.hasActiveSession || model.isStarting)
                 } header: {
-                    Text(tr("Anti-scintillement", "Anti-flicker"))
+                    Text("Anti-Flicker")
                 } footer: {
-                    Text(tr("Auto utilise votre région. Choisissez 50 Hz ou 60 Hz pour adapter le balayage à l’éclairage artificiel. Ce réglage se modifie avant une nouvelle prise de vue.",
-                            "Auto uses your region. Choose 50 Hz or 60 Hz to adapt the sweep to artificial lighting. Change this setting before a new capture."))
+                    Text("Auto uses your region. Choose 50 Hz or 60 Hz to adapt the sweep to artificial lighting. Change this setting before a new capture.")
                 }
                 Section {
-                    LabeledContent(tr("Version", "Version"), value: version)
-                    Label(tr("Photos traitées sur cet iPhone", "Photos processed on this iPhone"), systemImage: "iphone")
+                    LabeledContent("Version", value: version)
+                    Label("Photos Processed on This iPhone", systemImage: "iphone")
                         .foregroundStyle(.secondary)
                 } header: {
-                    Text(tr("À propos", "About"))
+                    Text("About")
                 } footer: {
-                    Text(tr("Vos images restent sur votre appareil. L’enregistrement dans Photos et le partage se font à votre demande.",
-                            "Your images stay on your device. Saving to Photos and sharing happen at your request."))
+                    Text("Your images stay on your device. Saving to Photos and sharing happen only when you ask.")
                 }
             }
-            .navigationTitle(tr("Réglages", "Settings"))
+            .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button(tr("Terminé", "Done"), systemImage: "checkmark") { dismiss() }
+                    Button(role: .confirm) { dismiss() }
                 }
             }
         }
@@ -80,7 +75,7 @@ struct AppSettingsView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { icons.refresh() }
         }
-        .alert(tr("Impossible de changer l’icône", "Couldn’t change the icon"),
+        .alert("Couldn’t Change the Icon",
                isPresented: Binding(get: { icons.errorMessage != nil }, set: { if !$0 { icons.errorMessage = nil } })) {
             Button("OK", role: .cancel) { icons.errorMessage = nil }
         } message: {
@@ -92,9 +87,9 @@ struct AppSettingsView: View {
         Section {
             VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(tr("Un autre point de vue.", "A different point of view."))
+                    Text("A Different Point of View.")
                         .font(.title3.weight(.semibold))
-                    Text(tr("Choisissez l’icône qui vous ressemble.", "Choose an icon that feels like you."))
+                    Text("Choose an icon that feels like you.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -106,13 +101,13 @@ struct AppSettingsView: View {
             }
             .padding(.vertical, 8)
         } header: {
-            Text(tr("Icône de l’app", "App icon"))
+            Text("App Icon")
         } footer: {
-            Text(icons.isSupported
-                 ? tr("Touchez une icône pour l’utiliser sur l’écran d’accueil. Vous pouvez revenir à l’originale à tout moment.",
-                      "Tap an icon to use it on your Home Screen. You can return to the original at any time.")
-                 : tr("Le changement d’icône n’est pas disponible sur cet appareil.",
-                      "Changing the app icon is unavailable on this device."))
+            if icons.isSupported {
+                Text("Tap an icon to use it on your Home Screen. You can return to the original at any time.")
+            } else {
+                Text("Changing the app icon isn’t available on this device.")
+            }
         }
     }
 
@@ -127,31 +122,31 @@ struct AppSettingsView: View {
                     .scaledToFit()
                     .frame(width: 72, height: 72)
                     .accessibilityHidden(true)
-                Text(icon.title(for: locale))
+                Text(icon.title)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.primary)
                 if icons.pendingIcon == icon {
-                    ProgressView().frame(height: 18)
+                    ProgressView()
                 } else {
                     Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selected ? CameraPalette.accent : Color.secondary)
-                        .frame(height: 18)
+                        .foregroundStyle(selected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 }
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 16)
-            .background(selected ? CameraPalette.accent.opacity(0.12) : Color.primary.opacity(0.04),
-                        in: RoundedRectangle(cornerRadius: 20))
+            .background(selected ? AnyShapeStyle(.tint.opacity(0.12)) : AnyShapeStyle(.fill.quaternary),
+                        in: .rect(cornerRadius: 20, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 20)
-                    .strokeBorder(selected ? CameraPalette.accent : .clear, lineWidth: 1.5)
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .strokeBorder(.tint, lineWidth: 1.5)
+                    .opacity(selected ? 1 : 0)
             }
-            .contentShape(RoundedRectangle(cornerRadius: 20))
+            .contentShape(.rect(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(!icons.isSupported || icons.pendingIcon != nil)
-        .accessibilityLabel(icon.title(for: locale))
-        .accessibilityValue(selected ? tr("Icône actuelle", "Current icon") : "")
+        .accessibilityLabel(Text(icon.title))
+        .accessibilityValue(selected ? Text("Current Icon") : Text(verbatim: ""))
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier("appIcon.\(icon.rawValue)")
     }
@@ -159,17 +154,5 @@ struct AppSettingsView: View {
     private var version: String {
         let info = Bundle.main.infoDictionary ?? [:]
         return "\(info["CFBundleShortVersionString"] as? String ?? "1.0") (\(info["CFBundleVersion"] as? String ?? "1"))"
-    }
-
-    private func lightingTitle(_ lighting: CaptureLighting) -> String {
-        switch lighting {
-        case .automatic: tr("Auto (région)", "Auto (region)")
-        case .hz50: "50 Hz"
-        case .hz60: "60 Hz"
-        }
-    }
-
-    private func tr(_ french: String, _ english: String) -> String {
-        locale.captureLanguageIsFrench ? french : english
     }
 }

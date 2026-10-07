@@ -139,6 +139,21 @@ struct VisualSweepCoverage: Sendable, Equatable {
         return min(1, area(output) / smaller)
     }
 
+    /// Every registered footprint must stay reachable from the others for the
+    /// seams and the export to form one image.
+    static func isConnected(_ polygons: [[CGPoint]], minimumOverlap: Double = 0.15) -> Bool {
+        guard !polygons.isEmpty else { return true }
+        var visited: Set<Int> = [0], frontier = [0]
+        while let index = frontier.popLast() {
+            for other in polygons.indices where !visited.contains(other) {
+                if overlap(polygons[index], polygons[other]) >= minimumOverlap {
+                    visited.insert(other); frontier.append(other)
+                }
+            }
+        }
+        return visited.count == polygons.count
+    }
+
     private static func clip(_ points: [CGPoint], to rect: CGRect) -> [CGPoint] {
         var output = clip(points) { $0.x - rect.minX }
         output = clip(output) { rect.maxX - $0.x }

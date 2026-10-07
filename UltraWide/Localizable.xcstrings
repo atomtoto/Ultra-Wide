@@ -1,0 +1,1472 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "%@ EV" : {
+      "comment" : "VoiceOver value of the exposure slider, in exposure value stops.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ IL"
+          }
+        }
+      }
+    },
+    "%lld MP" : {
+      "comment" : "Maximum output resolution in megapixels.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld Mpx"
+          }
+        }
+      }
+    },
+    "50 Hz" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "50 Hz"
+          }
+        }
+      }
+    },
+    "60 Hz" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "60 Hz"
+          }
+        }
+      }
+    },
+    "A Different Point of View." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Un autre point de vue."
+          }
+        }
+      }
+    },
+    "A slightly smaller frame, with no missing areas." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Un cadre légèrement réduit, sans zones manquantes."
+          }
+        }
+      }
+    },
+    "A video frame couldn’t be read." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Une image du flux vidéo n’a pas pu être lue."
+          }
+        }
+      }
+    },
+    "About" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "À propos"
+          }
+        }
+      }
+    },
+    "Adjust Exposure" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Régler l’exposition"
+          }
+        }
+      }
+    },
+    "Aim at an area with more detail" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Visez une zone avec plus de détails"
+          }
+        }
+      }
+    },
+    "Align the Center View" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alignez la vue centrale"
+          }
+        }
+      }
+    },
+    "Allow Photos access in Settings, or use Share." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Autorisez Photos dans Réglages, ou utilisez Partager."
+          }
+        }
+      }
+    },
+    "Allow camera access in Settings." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Autorisez l’accès à l’appareil photo dans Réglages."
+          }
+        }
+      }
+    },
+    "Amber" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ambre"
+          }
+        }
+      }
+    },
+    "An iPhone with a rear camera is required." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Un iPhone doté d’un appareil photo arrière est nécessaire."
+          }
+        }
+      }
+    },
+    "Anti-Flicker" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anti-scintillement"
+          }
+        }
+      }
+    },
+    "App Icon" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Icône de l’app"
+          }
+        }
+      }
+    },
+    "App Settings" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réglages de l’app"
+          }
+        }
+      }
+    },
+    "Applies to future captures, for Photos and sharing. Higher resolutions can increase assembly time and file size. The result depends on source images and iPhone memory, without upscaling." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "S’applique aux prochaines prises de vue, pour Photos et le partage. Une résolution plus élevée peut allonger l’assemblage et augmenter la taille du fichier. Le résultat dépend des images source et de la mémoire de l’iPhone, sans agrandissement artificiel."
+          }
+        }
+      }
+    },
+    "Assembly was cancelled." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’assemblage a été annulé."
+          }
+        }
+      }
+    },
+    "At least two photos are needed to assemble an image." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Au moins deux photos sont nécessaires pour assembler une image."
+          }
+        }
+      }
+    },
+    "Aurora" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aurore"
+          }
+        }
+      }
+    },
+    "Auto (Region)" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Auto (région)"
+          }
+        }
+      }
+    },
+    "Auto uses your region. Choose 50 Hz or 60 Hz to adapt the sweep to artificial lighting. Change this setting before a new capture." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Auto utilise votre région. Choisissez 50 Hz ou 60 Hz pour adapter le balayage à l’éclairage artificiel. Ce réglage se modifie avant une nouvelle prise de vue."
+          }
+        }
+      }
+    },
+    "Camera Access" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Accès à l’appareil photo"
+          }
+        }
+      }
+    },
+    "Camera Unavailable" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Appareil photo indisponible"
+          }
+        }
+      }
+    },
+    "Camera preview" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aperçu caméra"
+          }
+        }
+      }
+    },
+    "Cancel Capture" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Annuler la prise de vue"
+          }
+        }
+      }
+    },
+    "Capture" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prise de vue"
+          }
+        }
+      }
+    },
+    "Capture Interrupted" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prise de vue interrompue"
+          }
+        }
+      }
+    },
+    "Capture failed. Try again." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La prise de vue a échoué. Réessayez."
+          }
+        }
+      }
+    },
+    "Capture was interrupted. Try again." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La prise de vue a été interrompue. Réessayez."
+          }
+        }
+      }
+    },
+    "Captured Field Available" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Champ capturé disponible"
+          }
+        }
+      }
+    },
+    "Captured field · %@×" : {
+      "comment" : "The narrower field actually captured, with its zoom factor.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Champ capturé · %@×"
+          }
+        }
+      }
+    },
+    "Changing the app icon isn’t available on this device." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le changement d’icône n’est pas disponible sur cet appareil."
+          }
+        }
+      }
+    },
+    "Checking images…" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vérification des images…"
+          }
+        }
+      }
+    },
+    "Checking…" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vérification…"
+          }
+        }
+      }
+    },
+    "Choose an icon that feels like you." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Choisissez l’icône qui vous ressemble."
+          }
+        }
+      }
+    },
+    "Composition Grid" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Grille de cadrage"
+          }
+        }
+      }
+    },
+    "Continue" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Continuer"
+          }
+        }
+      }
+    },
+    "Continue Sweeping" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Continuer le balayage"
+          }
+        }
+      }
+    },
+    "Couldn’t Change the Icon" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Impossible de changer l’icône"
+          }
+        }
+      }
+    },
+    "Couldn’t Save Image" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enregistrement impossible"
+          }
+        }
+      }
+    },
+    "Couldn’t Stitch Image" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Assemblage impossible"
+          }
+        }
+      }
+    },
+    "Couldn’t save. Try again or share the image." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enregistrement impossible. Réessayez ou partagez l’image."
+          }
+        }
+      }
+    },
+    "Couldn’t stitch. Continue the sweep." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Assemblage impossible. Continuez le balayage."
+          }
+        }
+      }
+    },
+    "Coverage Complete" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couverture complète"
+          }
+        }
+      }
+    },
+    "Current Icon" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Icône actuelle"
+          }
+        }
+      }
+    },
+    "Discard" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Supprimer"
+          }
+        }
+      }
+    },
+    "Discard this capture?" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Supprimer cette prise de vue ?"
+          }
+        }
+      }
+    },
+    "Exposure Compensation" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Correction d’exposition"
+          }
+        }
+      }
+    },
+    "Fill the Frame" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Complétez le cadre"
+          }
+        }
+      }
+    },
+    "Fill the frame edges." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Complétez les bords du cadre."
+          }
+        }
+      }
+    },
+    "Final Frame" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Champ final"
+          }
+        }
+      }
+    },
+    "Final frame coverage" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couverture du champ final"
+          }
+        }
+      }
+    },
+    "Final photo" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Photo finale"
+          }
+        }
+      }
+    },
+    "Finishing…" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Finalisation…"
+          }
+        }
+      }
+    },
+    "Focus at center" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Mise au point au centre"
+          }
+        }
+      }
+    },
+    "Framing" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cadrage"
+          }
+        }
+      }
+    },
+    "Graphite" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Graphite"
+          }
+        }
+      }
+    },
+    "Haptic Feedback" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retour haptique"
+          }
+        }
+      }
+    },
+    "Hold the iPhone horizontally (landscape)." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tenez l’iPhone horizontalement (mode paysage)."
+          }
+        }
+      }
+    },
+    "Hold the iPhone in the orientation of the displayed frame." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tenez l’iPhone dans l’orientation du cadre affiché."
+          }
+        }
+      }
+    },
+    "Hold the iPhone still." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Immobilisez l’iPhone."
+          }
+        }
+      }
+    },
+    "Hold the iPhone vertically (portrait)." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Tenez l’iPhone verticalement (mode portrait)."
+          }
+        }
+      }
+    },
+    "Image details unavailable" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Détails de l’image indisponibles"
+          }
+        }
+      }
+    },
+    "Keep" : {
+      "comment" : "Cancels discarding the current capture.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Conserver"
+          }
+        }
+      }
+    },
+    "Lens" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Objectif"
+          }
+        }
+      }
+    },
+    "Lighting" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Éclairage"
+          }
+        }
+      }
+    },
+    "Main" : {
+      "comment" : "The iPhone main (wide) rear camera.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Principal"
+          }
+        }
+      }
+    },
+    "Maximum Resolution" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Résolution maximale"
+          }
+        }
+      }
+    },
+    "Motion Access" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Accès aux mouvements"
+          }
+        }
+      }
+    },
+    "Motion sensors are unavailable." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Les capteurs de mouvement sont indisponibles."
+          }
+        }
+      }
+    },
+    "Move a little more slowly" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ralentissez légèrement le mouvement"
+          }
+        }
+      }
+    },
+    "Move down" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vers le bas"
+          }
+        }
+      }
+    },
+    "Move down and left" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vers le bas à gauche"
+          }
+        }
+      }
+    },
+    "Move down and right" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vers le bas à droite"
+          }
+        }
+      }
+    },
+    "Move left" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vers la gauche"
+          }
+        }
+      }
+    },
+    "Move right" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vers la droite"
+          }
+        }
+      }
+    },
+    "Move the iPhone more steadily during the sweep." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Bougez moins l’iPhone pendant le balayage."
+          }
+        }
+      }
+    },
+    "Move up" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vers le haut"
+          }
+        }
+      }
+    },
+    "Move up and left" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vers le haut à gauche"
+          }
+        }
+      }
+    },
+    "Move up and right" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vers le haut à droite"
+          }
+        }
+      }
+    },
+    "New Capture" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Nouvelle prise de vue"
+          }
+        }
+      }
+    },
+    "OK" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "OK"
+          }
+        }
+      }
+    },
+    "One of the photos could not be opened." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Une des photos n’a pas pu être ouverte."
+          }
+        }
+      }
+    },
+    "Open Settings" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ouvrir Réglages"
+          }
+        }
+      }
+    },
+    "Original" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Originale"
+          }
+        }
+      }
+    },
+    "Output Image" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Image de sortie"
+          }
+        }
+      }
+    },
+    "Photo assembly requires an iPhone." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’assemblage des photos nécessite un iPhone."
+          }
+        }
+      }
+    },
+    "Photos Access" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Accès à Photos"
+          }
+        }
+      }
+    },
+    "Photos Processed on This iPhone" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Photos traitées sur cet iPhone"
+          }
+        }
+      }
+    },
+    "Point at the Center" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Pointez le centre"
+          }
+        }
+      }
+    },
+    "Preview" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aperçu"
+          }
+        }
+      }
+    },
+    "Preview of the image being assembled" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aperçu de l’image en cours d’assemblage"
+          }
+        }
+      }
+    },
+    "Ready to Capture" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Photo prête"
+          }
+        }
+      }
+    },
+    "Reduces flicker under artificial lighting." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réduit le scintillement sous éclairage artificiel."
+          }
+        }
+      }
+    },
+    "Reference View" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vue de référence"
+          }
+        }
+      }
+    },
+    "Reset Exposure" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réinitialiser l’exposition"
+          }
+        }
+      }
+    },
+    "Restart Camera" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réactiver l’appareil photo"
+          }
+        }
+      }
+    },
+    "Resume" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reprendre"
+          }
+        }
+      }
+    },
+    "Resume Sweep" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reprendre le balayage"
+          }
+        }
+      }
+    },
+    "Retry" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réessayer"
+          }
+        }
+      }
+    },
+    "Save" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enregistrer"
+          }
+        }
+      }
+    },
+    "Saved" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enregistrée"
+          }
+        }
+      }
+    },
+    "Saved to Photos" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enregistrée dans Photos"
+          }
+        }
+      }
+    },
+    "Saving images…" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enregistrement des images…"
+          }
+        }
+      }
+    },
+    "Settings" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réglages"
+          }
+        }
+      }
+    },
+    "Share Image" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Partager l’image"
+          }
+        }
+      }
+    },
+    "Show details" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Afficher les détails"
+          }
+        }
+      }
+    },
+    "Show whole photo" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Afficher toute la photo"
+          }
+        }
+      }
+    },
+    "Some photos don’t overlap enough. Sweep the missing areas more slowly." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Certaines photos ne se recouvrent pas assez. Balayez plus lentement les zones manquantes."
+          }
+        }
+      }
+    },
+    "Something Went Wrong" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Une erreur est survenue"
+          }
+        }
+      }
+    },
+    "Start Sweep" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Démarrer le balayage"
+          }
+        }
+      }
+    },
+    "Stitch" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Assembler"
+          }
+        }
+      }
+    },
+    "Stitching…" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Assemblage…"
+          }
+        }
+      }
+    },
+    "Stop Sweep" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Arrêter le balayage"
+          }
+        }
+      }
+    },
+    "Straighten the iPhone to keep the frame level." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Redressez l’iPhone pour garder le cadre droit."
+          }
+        }
+      }
+    },
+    "Sweep Freely" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Balayez librement"
+          }
+        }
+      }
+    },
+    "Sweep a little further before stopping." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Balayez un peu plus avant d’arrêter."
+          }
+        }
+      }
+    },
+    "Sweep the missing areas more slowly." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Balayez plus lentement les zones manquantes."
+          }
+        }
+      }
+    },
+    "Sweep to fill the frame" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Balayez pour compléter le cadre"
+          }
+        }
+      }
+    },
+    "Take Photo" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Prendre la photo"
+          }
+        }
+      }
+    },
+    "Tap an icon to use it on your Home Screen. You can return to the original at any time." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Touchez une icône pour l’utiliser sur l’écran d’accueil. Vous pouvez revenir à l’originale à tout moment."
+          }
+        }
+      }
+    },
+    "Tele" : {
+      "comment" : "The iPhone telephoto rear camera.",
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Télé"
+          }
+        }
+      }
+    },
+    "The 60-image limit has been reached. Start a new capture." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La limite de 60 images est atteinte. Recommencez une prise de vue."
+          }
+        }
+      }
+    },
+    "The camera couldn’t be prepared." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Impossible de préparer l’appareil photo."
+          }
+        }
+      }
+    },
+    "The camera is temporarily unavailable." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’appareil photo est momentanément indisponible."
+          }
+        }
+      }
+    },
+    "The capture isn’t ready yet." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La prise de vue n’est pas encore prête."
+          }
+        }
+      }
+    },
+    "The grid helps you compose your image. Haptics signal coverage gains and successful captures or saves." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La grille aide à composer l’image. Les vibrations signalent les gains de couverture et la réussite d’une capture ou d’un enregistrement."
+          }
+        }
+      }
+    },
+    "The image couldn’t be saved on this iPhone." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L’image n’a pas pu être enregistrée sur l’iPhone."
+          }
+        }
+      }
+    },
+    "The photos could not be aligned reliably. Try a steadier sweep." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Les photos n’ont pas pu être alignées de façon fiable. Balayez plus régulièrement."
+          }
+        }
+      }
+    },
+    "The saved capture is incomplete." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La session enregistrée est incomplète."
+          }
+        }
+      }
+    },
+    "The sweep does not cover the requested image. Capture the missing edges." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Le balayage ne couvre pas l’image demandée. Complétez les bords manquants."
+          }
+        }
+      }
+    },
+    "There’s no capture to resume." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aucune session à reprendre."
+          }
+        }
+      }
+    },
+    "These views can’t be aligned. Return toward an area already captured." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ces vues ne s’alignent pas. Revenez vers une zone déjà capturée."
+          }
+        }
+      }
+    },
+    "This area is too dark" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cette zone est trop sombre"
+          }
+        }
+      }
+    },
+    "This framing would need too many views with this lens." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ce cadrage demanderait trop de prises avec cet objectif."
+          }
+        }
+      }
+    },
+    "This lens isn’t available on this iPhone." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Cet objectif n’est pas disponible sur cet iPhone."
+          }
+        }
+      }
+    },
+    "Try Again" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réessayer"
+          }
+        }
+      }
+    },
+    "Try again." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réessayez."
+          }
+        }
+      }
+    },
+    "Unsaved photos will be deleted." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Les photos non enregistrées seront supprimées."
+          }
+        }
+      }
+    },
+    "Use Captured Field" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Utiliser le champ capturé"
+          }
+        }
+      }
+    },
+    "Version" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Version"
+          }
+        }
+      }
+    },
+    "Waiting for a camera image…" : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "En attente d’une image de la caméra…"
+          }
+        }
+      }
+    },
+    "Your images stay on your device. Saving to Photos and sharing happen only when you ask." : {
+      "localizations" : {
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vos images restent sur votre appareil. L’enregistrement dans Photos et le partage se font uniquement à votre demande."
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.0"
+}

@@ -49,14 +49,20 @@ final class PreviewHostView: UIView {
         super.init(frame: frame)
         addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(focus(_:))))
         focusRing.fillColor = UIColor.clear.cgColor
-        focusRing.strokeColor = UIColor(red: 1, green: 0.73, blue: 0.16, alpha: 1).cgColor
+        focusRing.strokeColor = tintColor.cgColor
         focusRing.lineWidth = 1.5
         focusRing.opacity = 0
         layer.addSublayer(focusRing)
         isAccessibilityElement = true
-        accessibilityLabel = Locale.current.captureLanguageIsFrench ? "Aperçu caméra" : "Camera preview"
-        accessibilityCustomActions = [UIAccessibilityCustomAction(name: Locale.current.captureLanguageIsFrench ? "Mise au point au centre" : "Focus at center",
+        accessibilityLabel = String(localized: "Camera preview")
+        accessibilityCustomActions = [UIAccessibilityCustomAction(name: String(localized: "Focus at center"),
             target: self, selector: #selector(focusAtCenter))]
+    }
+
+    override func tintColorDidChange() {
+        super.tintColorDidChange()
+        // The focus ring follows the app accent color, like SwiftUI controls.
+        focusRing.strokeColor = tintColor.cgColor
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }

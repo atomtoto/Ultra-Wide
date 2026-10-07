@@ -24,7 +24,6 @@ final class MotionGuide: CaptureMotionProviding {
     private var history = MotionReadingHistory()
     var onReading: ((MotionReading) -> Void)?
 
-    var isAvailable: Bool { manager.isDeviceMotionAvailable }
     var isActive: Bool { manager.isDeviceMotionActive }
     var hasReference: Bool { reference != nil }
 

@@ -24,6 +24,11 @@ final class CaptureSessionStore {
                     try manager.removeItem(at: currentURL)
                 }
                 try manager.createDirectory(at: currentURL, withIntermediateDirectories: true)
+                // Working sources are deleted after saving; never back them up.
+                var root = rootURL
+                var values = URLResourceValues()
+                values.isExcludedFromBackup = true
+                try? root.setResourceValues(values)
                 fileIO.sessionID = snapshot.sessionID
             }
             try save(snapshot)

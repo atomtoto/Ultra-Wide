@@ -10,8 +10,6 @@ import QuartzCore
 final class CaptureController: ObservableObject {
     @Published private(set) var status: CaptureStatus = .idle
     @Published private(set) var plan: CapturePlan?
-    @Published private(set) var slots: [CaptureSlot] = []
-    @Published private(set) var guidance: CaptureGuidance?
     @Published private(set) var coverage: CaptureCoverage?
     @Published private(set) var assemblyPreview: CGImage?
     @Published private(set) var visualCoverage: VisualSweepCoverage? {
@@ -25,13 +23,11 @@ final class CaptureController: ObservableObject {
     @Published private(set) var orientationCorrection: CaptureError?
     @Published private(set) var isCenterAnchoring = false
     @Published private(set) var isFinishingSweep = false
-    @Published private(set) var currentPass = 1
     @Published private(set) var captureBlockReason: SweepCaptureBlockReason?
     @Published private(set) var exposureBias: Float = 0
 
     /// Bound durable sources, not the number of exposures in a sweep.
     let maximumFrames = 60
-    let maximumRetakes = 60
     private let camera: any CameraCapturing
     private let motion: any CaptureMotionProviding
     private let store: CaptureSessionStore
@@ -89,12 +85,10 @@ final class CaptureController: ObservableObject {
             hypot($0.yawDegrees, $0.pitchDegrees) < hypot($1.yawDegrees, $1.pitchDegrees)
         }
     }
-    var remainingRetakes: Int { max(0, maximumFrames - completedCount) }
     var completedCount: Int { (snapshot?.frames.count ?? 0) + frameQueue.count }
     private var hasCaptureCapacity: Bool {
         completedCount < maximumFrames + SweepFrameQueue.capacity
     }
-    var currentSlot: CaptureSlot? { nil }
 
     private func orientationCorrection(for reading: MotionReading) -> CaptureError? {
         if !reading.orientationMatchesConfiguration { return .orientationChanged }
@@ -271,15 +265,6 @@ final class CaptureController: ObservableObject {
             status = .failed(error.localizedDescription)
             throw error
         }
-    }
-
-    /// Compatibility alias for callers that prepared the previous still mode.
-    func start(
-        lens: CaptureLens,
-        target: CaptureTarget,
-        orientation: CaptureOrientation = .portrait
-    ) async throws {
-        try await preparePreview(lens: lens, target: target, orientation: orientation)
     }
 
     /// Fixes the motion origin at the composed center and begins a free sweep.
@@ -477,56 +462,6 @@ final class CaptureController: ObservableObject {
         }
     }
 
-    // Compatibility entry points during migration of the coordinator.
-    @discardableResult
-    func finishPass() async throws -> CaptureSessionSnapshot { try await stopSweep() }
-
-    func beginRefinementPass() async throws { try await resumeSweep() }
-
-    @discardableResult
-    func anchorCenterAndCapture() async throws -> CapturedFrame {
-        try await beginSweep()
-        let deadline = CACurrentMediaTime() + 4
-        while CACurrentMediaTime() < deadline {
-            if let frame = snapshot?.frames.first { return frame }
-            try await Task.sleep(for: .milliseconds(40))
-        }
-        throw CaptureError.notAligned
-    }
-
-    @discardableResult
-    func captureCurrentView() async throws -> CapturedFrame {
-        guard status == .capturing, !captureRequested, !isFinishingSweep, !frameQueue.isFull,
-              hasCaptureCapacity,
-              let reading = latestReading, readingIsFresh(reading) else {
-            throw CaptureError.notReady
-        }
-        captureRequested = true
-        guard let frame = await captureCandidate(reading) else { throw CaptureError.notAligned }
-        return frame
-    }
-
-    func retake(slotID: String) throws {
-        guard var saved = snapshot,
-              let index = saved.slots.firstIndex(where: { $0.id == slotID }),
-              let old = saved.slots[index].frame else { throw CaptureError.invalidSlot }
-        saved.slots.remove(at: index)
-        saved.coverageFraction = nil
-        saved.updatedAt = Date()
-        let newTracker = CoverageTracker(plan: saved.plan, frames: saved.frames)
-        saved.coverageFraction = confirmedCoverage(in: saved)?.fraction ?? 0
-        try store.save(saved)
-        store.removePhoto(at: old.fileURL)
-        snapshot = saved
-        tracker = newTracker
-        visualCoverage = confirmedCoverage(in: saved)
-        assemblyPreview = nil
-        publish(saved)
-        scheduleAlignment(saved)
-        coverage = tracker?.coverage(viewYaw: latestReading?.yawDegrees ?? 0,
-                                     viewPitch: latestReading?.pitchDegrees ?? 0)
-    }
-
     func pause() {
         lifecycleGeneration += 1
         cancelAlignment()
@@ -625,10 +560,7 @@ final class CaptureController: ObservableObject {
         referenceYawOffset = 0
         referencePitchOffset = 0
         plan = nil
-        slots = []
-        guidance = nil
         coverage = nil
-        currentPass = 1
         orientationNeedsCorrection = false
         orientationCorrection = nil
         status = .idle
@@ -636,8 +568,6 @@ final class CaptureController: ObservableObject {
 
     private func publish(_ saved: CaptureSessionSnapshot) {
         plan = saved.plan
-        slots = saved.slots
-        currentPass = saved.currentPass
     }
 
     /// Every accepted image overlaps the existing graph. Removing a vertex
@@ -682,11 +612,11 @@ final class CaptureController: ObservableObject {
                 let remainsConnected: Bool
                 if let polygons = polygonsByFrame {
                     fractionLoss = losses?[frame.id] ?? 0
-                    remainsConnected = projectedFramesRemainConnected(remaining.compactMap { polygons[$0.id] })
+                    remainsConnected = VisualSweepCoverage.isConnected(remaining.compactMap { polygons[$0.id] })
                 } else {
                     let candidateTracker = CoverageTracker(plan: saved.plan, frames: remaining)
                     fractionLoss = max(0, previousFraction - candidateTracker.fraction)
-                    remainsConnected = framesRemainConnected(candidateTracker.imageRects)
+                    remainsConnected = CoverageTracker.isConnected(candidateTracker.imageRects)
                 }
                 let option = (
                     slotIndex: slotIndex,
@@ -714,40 +644,6 @@ final class CaptureController: ObservableObject {
             VisualSweepCoverage(polygons: saved.frames.compactMap { polygons[$0.id] }).fraction
         } ?? 0
         return (saved, retiredURLs)
-    }
-
-    private nonisolated static func projectedFramesRemainConnected(_ polygons: [[CGPoint]]) -> Bool {
-        guard !polygons.isEmpty else { return true }
-        var visited: Set<Int> = [0], frontier = [0]
-        while let index = frontier.popLast() {
-            for other in polygons.indices where !visited.contains(other) {
-                if VisualSweepCoverage.overlap(polygons[index], polygons[other]) >= 0.15 {
-                    visited.insert(other); frontier.append(other)
-                }
-            }
-        }
-        return visited.count == polygons.count
-    }
-
-    private nonisolated static func framesRemainConnected(_ rects: [CGRect]) -> Bool {
-        guard !rects.isEmpty else { return true }
-        var visited: Set<Int> = [0]
-        var frontier = [0]
-        while let index = frontier.popLast() {
-            for other in rects.indices where !visited.contains(other) {
-                let intersection = rects[index].intersection(rects[other])
-                guard !intersection.isNull else { continue }
-                let smallerArea = min(rects[index].width * rects[index].height,
-                                      rects[other].width * rects[other].height)
-                guard smallerArea > 0,
-                      intersection.width * intersection.height / smallerArea >= 0.30 else {
-                    continue
-                }
-                visited.insert(other)
-                frontier.append(other)
-            }
-        }
-        return visited.count == rects.count
     }
 
     private func adjusted(_ raw: MotionReading) -> MotionReading {

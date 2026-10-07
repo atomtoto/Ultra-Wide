@@ -26,11 +26,17 @@ final class CameraService: CameraCapturing, @unchecked Sendable {
     private var lighting: CaptureLighting = .automatic
     private var sweepSettingsLocked = false
 
-    static func device(for lens: CaptureLens) -> AVCaptureDevice? {
-        let type: AVCaptureDevice.DeviceType = lens == .wide
-            ? .builtInWideAngleCamera : .builtInTelephotoCamera
-        return AVCaptureDevice.default(type, for: .video, position: .back)
-    }
+    /// Built-in cameras do not change while the app runs. Discover them once:
+    /// the UI asks for their fields of view on every synchronization.
+    private static let devices: [CaptureLens: AVCaptureDevice] = Dictionary(
+        uniqueKeysWithValues: CaptureLens.allCases.compactMap { lens in
+            let type: AVCaptureDevice.DeviceType = lens == .wide
+                ? .builtInWideAngleCamera : .builtInTelephotoCamera
+            return AVCaptureDevice.default(type, for: .video, position: .back).map { (lens, $0) }
+        }
+    )
+
+    static func device(for lens: CaptureLens) -> AVCaptureDevice? { devices[lens] }
 
     static var availableLenses: [CaptureLens] {
         CaptureLens.allCases.filter { device(for: $0) != nil }

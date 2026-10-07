@@ -37,14 +37,9 @@ enum CaptureTarget: String, CaseIterable, Codable, Identifiable, Sendable {
         }
     }
 
-    var label: String {
-        switch self {
-        case .half: "0,5×"
-        case .threeQuarters: "0,75×"
-        case .one: "1×"
-        case .onePointFive: "1,5×"
-        case .two: "2×"
-        }
+    /// Locale-aware zoom label, such as “0.5×” or “0,5×”.
+    var title: String {
+        magnification.formatted(.number) + "×"
     }
 
     /// Zoom required on the selected physical lens to match this field.
@@ -221,24 +216,6 @@ struct CaptureCoverage: Equatable, Sendable {
     let fraction: Double
 }
 
-struct CaptureGuidance: Equatable, Sendable {
-    let slotID: String
-    /// Positive horizontal error asks the user to turn the phone to the right.
-    let horizontalErrorDegrees: Double
-    /// Positive vertical error asks the user to tilt the phone upward.
-    let verticalErrorDegrees: Double
-    let rollDegrees: Double
-    /// False when the phone has been turned away from the orientation fixed
-    /// at the beginning of the session.
-    let isOrientationValid: Bool
-    let isAligned: Bool
-    let isStable: Bool
-    let actualYawDegrees: Double
-    let actualPitchDegrees: Double
-
-    var canCapture: Bool { isOrientationValid && isAligned && isStable }
-}
-
 enum CaptureStatus: Equatable, Sendable {
     case idle
     case preparing
@@ -266,10 +243,8 @@ enum CaptureError: LocalizedError, Equatable, Sendable {
     case notAligned
     case orientationChanged
     case excessiveRoll
-    case noCurrentSlot
     case incompletePass
     case retakeLimitReached
-    case invalidSlot
     case noSavedSession
     case corruptSavedSession
     case photoDataUnavailable
@@ -277,24 +252,22 @@ enum CaptureError: LocalizedError, Equatable, Sendable {
 
     var errorDescription: String? {
         switch self {
-        case .cameraPermissionDenied: "Autorisez l’accès à l’appareil photo dans Réglages."
-        case .cameraUnavailable: "L’appareil photo est momentanément indisponible."
-        case .lensUnavailable: "Cet objectif n’est pas disponible sur cet iPhone."
-        case .targetUnavailable: "Ce cadrage demanderait trop de prises avec cet objectif."
-        case .cameraConfigurationFailed: "Impossible de préparer l’appareil photo."
-        case .motionUnavailable: "Les capteurs de mouvement sont indisponibles."
-        case .notReady: "La prise de vue n’est pas prête."
-        case .notAligned: "Alignez le repère et immobilisez l’iPhone."
-        case .orientationChanged: "Tenez l’iPhone dans l’orientation du cadre affiché."
-        case .excessiveRoll: "Redressez l’iPhone pour garder le cadre droit."
-        case .noCurrentSlot: "Aucune vue n’est disponible."
-        case .incompletePass: "Balayez un peu plus avant d’arrêter."
-        case .retakeLimitReached: "La limite de 60 images est atteinte. Recommencez une prise."
-        case .invalidSlot: "Cette vue n’appartient pas à la session."
-        case .noSavedSession: "Aucune session à reprendre."
-        case .corruptSavedSession: "La session enregistrée est incomplète."
-        case .photoDataUnavailable: "Une image du flux vidéo n’a pas pu être lue."
-        case .diskWriteFailed: "L’image n’a pas pu être enregistrée sur l’iPhone."
+        case .cameraPermissionDenied: String(localized: "Allow camera access in Settings.")
+        case .cameraUnavailable: String(localized: "The camera is temporarily unavailable.")
+        case .lensUnavailable: String(localized: "This lens isn’t available on this iPhone.")
+        case .targetUnavailable: String(localized: "This framing would need too many views with this lens.")
+        case .cameraConfigurationFailed: String(localized: "The camera couldn’t be prepared.")
+        case .motionUnavailable: String(localized: "Motion sensors are unavailable.")
+        case .notReady: String(localized: "The capture isn’t ready yet.")
+        case .notAligned: String(localized: "Hold the iPhone still.")
+        case .orientationChanged: String(localized: "Hold the iPhone in the orientation of the displayed frame.")
+        case .excessiveRoll: String(localized: "Straighten the iPhone to keep the frame level.")
+        case .incompletePass: String(localized: "Sweep a little further before stopping.")
+        case .retakeLimitReached: String(localized: "The 60-image limit has been reached. Start a new capture.")
+        case .noSavedSession: String(localized: "There’s no capture to resume.")
+        case .corruptSavedSession: String(localized: "The saved capture is incomplete.")
+        case .photoDataUnavailable: String(localized: "A video frame couldn’t be read.")
+        case .diskWriteFailed: String(localized: "The image couldn’t be saved on this iPhone.")
         }
     }
 }

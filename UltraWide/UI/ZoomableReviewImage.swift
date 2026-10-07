@@ -77,17 +77,17 @@ final class ReviewImageHost: UIView, UIScrollViewDelegate {
         failure.textAlignment = .center
         failure.numberOfLines = 0
         failure.isHidden = true
-        failure.text = Locale.current.captureLanguageIsFrench ? "Détails de l’image indisponibles" : "Image details unavailable"
+        failure.text = String(localized: "Image details unavailable")
         addSubview(failure)
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(zoomAtTap(_:)))
         doubleTap.numberOfTapsRequired = 2
         scrollView.addGestureRecognizer(doubleTap)
         imageView.isAccessibilityElement = true
-        imageView.accessibilityLabel = Locale.current.captureLanguageIsFrench ? "Photo finale" : "Final photo"
+        imageView.accessibilityLabel = String(localized: "Final photo")
         imageView.accessibilityCustomActions = [
-            UIAccessibilityCustomAction(name: Locale.current.captureLanguageIsFrench ? "Afficher les détails" : "Show details",
+            UIAccessibilityCustomAction(name: String(localized: "Show details"),
                 target: self, selector: #selector(showDetails)),
-            UIAccessibilityCustomAction(name: Locale.current.captureLanguageIsFrench ? "Afficher toute la photo" : "Show whole photo",
+            UIAccessibilityCustomAction(name: String(localized: "Show whole photo"),
                 target: self, selector: #selector(showWholePhoto))
         ]
     }

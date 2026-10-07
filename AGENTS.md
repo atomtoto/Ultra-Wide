@@ -83,7 +83,7 @@ Do **not** create custom versions of:
 - swipe actions
 - standard buttons
 
-unless the native SwiftUI implementation genuinely cannot satisfy the required behavior.
+**unless the native SwiftUI implementation genuinely cannot satisfy the required behavior.**
 
 Do not build a custom component merely to obtain a slightly different visual appearance.
 
@@ -127,8 +127,6 @@ When several implementations are possible, choose them in this order:
 
 **Native SwiftUI API → composition of native SwiftUI components → small custom SwiftUI component → UIKit/AppKit bridge → fully custom control**
 
-When reviewing existing code, proactively simplify custom implementations when they can now be replaced by a native SwiftUI API.
-
 The desired result is not merely an interface that visually resembles iOS. It should **behave like iOS because it is built from the same system primitives Apple expects apps to use.**
 
-For this project, follow this hierarchy by default: **native SwiftUI → native composition → custom only when necessary.**
+For this project, follow this hierarchy by default: **native SwiftUI → native composition → custom only when necessary.** You can ask the user when you think custom components would be better.

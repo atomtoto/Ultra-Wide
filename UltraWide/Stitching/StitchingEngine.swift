@@ -67,7 +67,7 @@ public enum StitchingFailure: Error, LocalizedError, Sendable {
         switch self {
         case .insufficientImages: String(localized: "At least two photos are needed to assemble an image.")
         case .unreadableImage: String(localized: "One of the photos could not be opened.")
-        case .insufficientOverlap: String(localized: "Some photos do not overlap enough. Retake the indicated views.")
+        case .insufficientOverlap: String(localized: "Some photos don’t overlap enough. Sweep the missing areas more slowly.")
         case .invalidGeometry: String(localized: "The photos could not be aligned reliably. Try a steadier sweep.")
         case .incompleteCoverage: String(localized: "The sweep does not cover the requested image. Capture the missing edges.")
         case .exportFailed(let reason): reason

@@ -3,7 +3,6 @@ import Combine
 import Foundation
 import ImageIO
 import Photos
-import SwiftUI
 import UIKit
 
 /// Connects the free video sweep, on-device assembler, and SwiftUI camera.
@@ -15,26 +14,34 @@ final class UltraWideCoordinator {
     private let stitcher = StitchingEngine()
     private var cancellables = Set<AnyCancellable>()
     private var isAssembling = false
+    private var synchronizeScheduled = false
     private var automaticAssemblyKey: String?
     private var orientationBannerActive = false
     private var lastOutputURL: URL?
     private var lastAssemblyPreview: CGImage?
+    private var reanchorImageURL: URL?
+    private var targetsCacheKey: TargetsCacheKey?
     private var pendingExposureBias: Double?
     private var pendingMeteringPoint: CGPoint?
     private var cameraAdjustmentTask: Task<Void, Never>?
     private var lastHapticFraction = 0.0
     private var lastHapticAt = Date.distantPast
-    private let acquisitionFeedback = UISelectionFeedbackGenerator()
+
+    /// Finished images are only kept while they are reviewed. They live outside
+    /// iCloud backups and are never restored after a relaunch.
+    private static let resultsDirectory = FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("UltraWideResults", isDirectory: true)
 
     init() {
+        Self.removeAbandonedFiles()
         ui.onAction = { [weak self] action in
             Task { @MainActor [weak self] in await self?.handle(action) }
         }
         capture.objectWillChange.sink { [weak self] in
-            Task { @MainActor [weak self] in
-                await Task.yield()
-                self?.synchronize()
-            }
+            // Published changes arrive on the main actor, often several per
+            // motion sample. Read them once, after they have all been applied.
+            MainActor.assumeIsolated { self?.scheduleSynchronize() }
         }.store(in: &cancellables)
         synchronize()
         if CaptureDiagnostics.enabled {
@@ -65,8 +72,7 @@ final class UltraWideCoordinator {
                 ui.phase = .unavailable
                 ui.issue = CaptureUIIssue(
                     kind: .cameraUnavailable,
-                    detail: message("Un iPhone doté d’un appareil photo arrière est nécessaire.",
-                                    "An iPhone with a rear camera is required."),
+                    detail: String(localized: "An iPhone with a rear camera is required."),
                     canRetry: false
                 )
             } else if capture.currentSnapshot == nil,
@@ -93,11 +99,11 @@ final class UltraWideCoordinator {
         case .setExposureBias:
             pendingExposureBias = ui.exposureBias
             applyCameraAdjustments()
-        case .start, .startSweep:
+        case .startSweep:
             await beginOrResumeSweep()
         case .resume:
             await resumeSavedSweep()
-        case .stopSweep, .finishPass:
+        case .stopSweep:
             do {
                 _ = try await capture.stopSweep()
                 ui.issue = nil
@@ -116,8 +122,6 @@ final class UltraWideCoordinator {
                 showCaptureError(error, fatal: capture.status.isFailure)
                 synchronize()
             }
-        case .beginRefinementPass:
-            await beginOrResumeSweep()
         case .assemble:
             await assemble()
         case .useCapturedField:
@@ -129,24 +133,13 @@ final class UltraWideCoordinator {
         case .continueAfterCrop:
             ui.phase = .passReview
             await beginOrResumeSweep()
-        case .capture:
-            // Kept for existing accessibility shortcuts; the sweep captures frames itself.
-            if capture.currentSnapshot == nil { await beginOrResumeSweep() }
-        case .retake(let slotID):
-            do {
-                try capture.retake(slotID: slotID)
-                ui.issue = nil
-                synchronize()
-            } catch {
-                showCaptureError(error, fatal: false)
-            }
         case .pause:
             cameraAdjustmentTask?.cancel()
             pendingExposureBias = nil
             pendingMeteringPoint = nil
             capture.pause()
             synchronize()
-        case .discard, .newCapture:
+        case .discard:
             resetCapture()
         case .saveToPhotos:
             await saveToPhotos()
@@ -158,9 +151,6 @@ final class UltraWideCoordinator {
             } else {
                 await preparePreview()
             }
-        case .openSettings:
-            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-            await UIApplication.shared.open(url)
         }
     }
 
@@ -190,11 +180,9 @@ final class UltraWideCoordinator {
 
     private func preparePreview() async {
         guard capture.currentSnapshot == nil else { return }
-        let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
-        let target = CaptureTarget(rawValue: ui.selectedTarget.rawValue) ?? .half
         ui.isStarting = true
         do {
-            try await capture.preparePreview(lens: lens, target: target,
+            try await capture.preparePreview(lens: ui.selectedLens, target: ui.selectedTarget,
                                              orientation: currentOrientation())
             ui.issue = nil
             ui.banner = nil
@@ -213,9 +201,7 @@ final class UltraWideCoordinator {
             ui.isStarting = true
             if capture.currentSnapshot == nil
                 && (capture.status != .ready || capture.plan?.orientation != currentOrientation()) {
-                let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
-                let target = CaptureTarget(rawValue: ui.selectedTarget.rawValue) ?? .half
-                try await capture.preparePreview(lens: lens, target: target,
+                try await capture.preparePreview(lens: ui.selectedLens, target: ui.selectedTarget,
                                                  orientation: currentOrientation())
             }
             if capture.status == .reviewing {
@@ -246,11 +232,7 @@ final class UltraWideCoordinator {
         ui.issue = nil
         ui.processingProgress = nil
         do {
-            let folder = FileManager.default.urls(for: .applicationSupportDirectory,
-                                                   in: .userDomainMask)[0]
-                .appendingPathComponent("UltraWideResults", isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let baseURL = folder.appendingPathComponent(UUID().uuidString)
+            let baseURL = try Self.makeResultsDirectory().appendingPathComponent(UUID().uuidString)
             let result = try await capture.captureSinglePhoto(
                 to: baseURL, maximumMegapixels: AppPreferences.outputResolution().rawValue
             )
@@ -265,9 +247,6 @@ final class UltraWideCoordinator {
             ui.saveState = .idle
             ui.phase = .review
             ui.isStarting = false
-            if AppPreferences.hapticsEnabled() {
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-            }
         } catch {
             ui.phase = .setup
             ui.isStarting = false
@@ -308,10 +287,8 @@ final class UltraWideCoordinator {
 
         let outputURL: URL
         do {
-            let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("UltraWideResults", isDirectory: true)
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            outputURL = folder.appendingPathComponent("\(snapshot.sessionID.uuidString)-\(UUID().uuidString).heic")
+            outputURL = try Self.makeResultsDirectory()
+                .appendingPathComponent("\(snapshot.sessionID.uuidString)-\(UUID().uuidString).heic")
         } catch {
             ui.processingProgress = nil
             showStitchError(error)
@@ -364,9 +341,6 @@ final class UltraWideCoordinator {
             ui.processingProgress = nil
             ui.phase = .review
             ui.banner = nil
-            if AppPreferences.hapticsEnabled() {
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-            }
         } catch {
             try? FileManager.default.removeItem(at: outputURL)
             ui.processingProgress = nil
@@ -396,47 +370,48 @@ final class UltraWideCoordinator {
         guard status == .authorized || status == .limited else {
             ui.saveState = .idle
             ui.issue = CaptureUIIssue(kind: .photoLibraryPermission,
-                                      detail: message("Autorisez Photos dans Réglages, ou utilisez Partager.",
-                                                      "Allow Photos in Settings, or use Share."),
+                                      detail: String(localized: "Allow Photos access in Settings, or use Share."),
                                       canRetry: false)
             return
         }
         do {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                PHPhotoLibrary.shared().performChanges {
-                    let request = PHAssetCreationRequest.forAsset()
-                    request.addResource(with: .photo, fileURL: url, options: nil)
-                } completionHandler: { success, error in
-                    if success { continuation.resume() }
-                    else { continuation.resume(throwing: error ?? PhotoSaveError.failed) }
-                }
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: url, options: nil)
             }
             ui.saveState = .saved
             ui.issue = nil
-            if AppPreferences.hapticsEnabled() {
-                UINotificationFeedbackGenerator().notificationOccurred(.success)
-            }
             capture.discard()
             synchronize()
         } catch {
             ui.saveState = .idle
             ui.issue = CaptureUIIssue(kind: .saveFailure,
-                                      detail: message("Enregistrement impossible. Réessayez ou partagez l’image.",
-                                                      "Couldn’t save. Try again or share the image."),
+                                      detail: String(localized: "Couldn’t save. Try again or share the image."),
                                       canRetry: true)
         }
     }
 
+    private func scheduleSynchronize() {
+        guard !synchronizeScheduled else { return }
+        synchronizeScheduled = true
+        Task { @MainActor [weak self] in
+            // objectWillChange fires before the new value is stored.
+            await Task.yield()
+            guard let self else { return }
+            self.synchronizeScheduled = false
+            self.synchronize()
+        }
+    }
+
     private func synchronize() {
-        ui.availableLenses = capture.availableLenses.compactMap { CaptureUILens(rawValue: $0.rawValue) }
+        ui.availableLenses = capture.availableLenses
         ui.hasActiveSession = capture.currentSnapshot != nil
         ui.hasRecoverableSession = capture.hasRecoverableSession
         ui.canAdjustCamera = capture.canAdjustCamera
         if cameraAdjustmentTask == nil { ui.exposureBias = Double(capture.exposureBias) }
         if let plan = capture.plan {
             if capture.currentSnapshot != nil {
-                ui.selectedLens = CaptureUILens(rawValue: plan.lens.rawValue) ?? .wide
-                ui.selectedTarget = CaptureUITarget(rawValue: plan.target.rawValue) ?? .half
+                ui.selectedLens = plan.lens
+                ui.selectedTarget = plan.target
             }
             ui.previewRotationAngle = plan.orientation.rotationAngle
         }
@@ -447,47 +422,10 @@ final class UltraWideCoordinator {
             ui.previewSession = nil
         }
         updateAvailableTargets()
-        if let coverage = capture.coverage {
-            ui.sweep.viewRect = coverage.viewRect
-        } else {
-            ui.sweep.viewRect = CaptureUISweep().viewRect
-        }
-        if let visual = capture.visualCoverage {
-            // Motion positions guide the live camera frame; only image alignment
-            // contributes to the completed field shown to the photographer.
-            ui.sweep.coveredRects = []
-            if ui.sweep.coveredPolygons != visual.polygons {
-                ui.sweep.coveredPolygons = visual.polygons
-            }
-            ui.sweep.coverageFraction = visual.fraction
-            ui.sweep.isComplete = visual.isComplete
-        } else {
-            ui.sweep.coveredRects = []
-            ui.sweep.coveredPolygons = []
-            ui.sweep.coverageFraction = 0
-            ui.sweep.isComplete = false
-        }
-        if capture.assemblyPreview !== lastAssemblyPreview {
-            lastAssemblyPreview = capture.assemblyPreview
-            ui.sweep.previewImage = capture.assemblyPreview.map { UIImage(cgImage: $0) }
-        }
-        ui.sweep.isVerifyingAlignment = capture.isVerifyingAlignment
-        ui.sweep.isRecording = capture.status == .capturing
-        ui.sweep.isFinishing = capture.isFinishingSweep || isAssembling || ui.phase == .processing
-        ui.sweep.blockReason = capture.captureBlockReason
-        if let analysis = capture.sweepAnalysis {
-            let center = CGPoint(x: ui.sweep.viewRect.midX, y: ui.sweep.viewRect.midY)
-            ui.sweep.missingTarget = analysis.target(from: center, retaining: ui.sweep.missingTarget)
-            ui.sweep.guidanceDirection = ui.sweep.missingTarget.map { CGVector(dx: $0.x - center.x, dy: $0.y - center.y) }
-            ui.sweep.capturedField = analysis.capturedField?.rect
-        } else {
-            ui.sweep.missingTarget = nil
-            ui.sweep.guidanceDirection = nil
-            ui.sweep.capturedField = nil
-        }
-        if AppPreferences.hapticsEnabled(), capture.status == .capturing, ui.sweep.coverageFraction - lastHapticFraction >= 0.02,
+        synchronizeSweep()
+        if capture.status == .capturing, ui.sweep.coverageFraction - lastHapticFraction >= 0.02,
            Date().timeIntervalSince(lastHapticAt) >= 0.4 {
-            acquisitionFeedback.selectionChanged()
+            ui.coverageFeedbackCount += 1
             lastHapticFraction = ui.sweep.coverageFraction
             lastHapticAt = Date()
         }
@@ -508,8 +446,11 @@ final class UltraWideCoordinator {
                 if ui.phase != .passReview { ui.phase = .setup }
             case .recalibrating:
                 ui.phase = .reanchor
-                ui.reanchorImage = capture.calibrationFrameURL.flatMap {
-                    makeThumbnail(url: $0, maxPixelSize: 900)
+                // Decode the reference once, not on every motion sample.
+                let url = capture.calibrationFrameURL
+                if url != reanchorImageURL {
+                    reanchorImageURL = url
+                    ui.reanchorImage = url.flatMap { makeThumbnail(url: $0, maxPixelSize: 900) }
                 }
             case .capturing:
                 ui.phase = .capturing
@@ -519,8 +460,7 @@ final class UltraWideCoordinator {
                 if ui.issue == nil {
                     ui.issue = CaptureUIIssue(
                         kind: .captureFailure,
-                        detail: message("La prise de vue a été interrompue. Réessayez.",
-                                        "Capture was interrupted. Try again."),
+                        detail: String(localized: "Capture was interrupted. Try again."),
                         canRetry: true
                     )
                 }
@@ -531,17 +471,65 @@ final class UltraWideCoordinator {
         scheduleAutomaticAssembly()
     }
 
+    /// Builds the sweep state as one value: the camera overlay is invalidated
+    /// only when something it displays actually changed.
+    private func synchronizeSweep() {
+        var sweep = ui.sweep
+        sweep.viewRect = capture.coverage?.viewRect ?? CaptureUISweep().viewRect
+        if let visual = capture.visualCoverage {
+            // Motion positions guide the live camera frame; only image alignment
+            // contributes to the completed field shown to the photographer.
+            sweep.coveredPolygons = visual.polygons
+            sweep.coverageFraction = visual.fraction
+            sweep.isComplete = visual.isComplete
+        } else {
+            sweep.coveredPolygons = []
+            sweep.coverageFraction = 0
+            sweep.isComplete = false
+        }
+        if capture.assemblyPreview !== lastAssemblyPreview {
+            lastAssemblyPreview = capture.assemblyPreview
+            sweep.previewImage = capture.assemblyPreview.map { UIImage(cgImage: $0) }
+        }
+        sweep.isVerifyingAlignment = capture.isVerifyingAlignment
+        sweep.isRecording = capture.status == .capturing
+        sweep.isFinishing = capture.isFinishingSweep || isAssembling || ui.phase == .processing
+        sweep.blockReason = capture.captureBlockReason
+        if let analysis = capture.sweepAnalysis {
+            let center = CGPoint(x: sweep.viewRect.midX, y: sweep.viewRect.midY)
+            sweep.missingTarget = analysis.target(from: center, retaining: sweep.missingTarget)
+            sweep.guidanceDirection = sweep.missingTarget.map { CGVector(dx: $0.x - center.x, dy: $0.y - center.y) }
+            sweep.capturedField = analysis.capturedField?.rect
+        } else {
+            sweep.missingTarget = nil
+            sweep.guidanceDirection = nil
+            sweep.capturedField = nil
+        }
+        if sweep != ui.sweep { ui.sweep = sweep }
+    }
+
+    private struct TargetsCacheKey: Equatable {
+        let lens: CaptureLens
+        let orientation: CaptureOrientation
+        let plan: CapturePlan?
+    }
+
     private func updateAvailableTargets() {
-        let lens = CaptureLens(rawValue: ui.selectedLens.rawValue) ?? .wide
+        let lens = ui.selectedLens
         let orientation = capture.currentSnapshot?.plan.orientation ?? currentOrientation()
-        ui.availableTargets = capture.availableTargets(for: lens, orientation: orientation)
-            .compactMap { CaptureUITarget(rawValue: $0.rawValue) }
+        // Fields of view only change with the lens, orientation or a new
+        // camera configuration, never with motion samples.
+        let key = TargetsCacheKey(lens: lens, orientation: orientation, plan: capture.plan)
+        if key != targetsCacheKey || ui.availableTargets.isEmpty {
+            targetsCacheKey = key
+            ui.availableTargets = capture.availableTargets(for: lens, orientation: orientation)
+        }
         if !ui.availableTargets.contains(ui.selectedTarget) {
             ui.selectedTarget = ui.availableTargets.first ?? .half
         }
         ui.isSinglePhoto = capture.currentSnapshot == nil
             && capture.plan?.lens == lens
-            && capture.plan?.target.rawValue == ui.selectedTarget.rawValue
+            && capture.plan?.target == ui.selectedTarget
             && capture.singlePhotoCropFactor != nil
     }
 
@@ -562,19 +550,16 @@ final class UltraWideCoordinator {
 
     private func showStitchError(_ error: Error) {
         ui.phase = .passReview
-        let detail: CaptureUIMessage
+        let detail: String
         switch error {
         case StitchingFailure.incompleteCoverage:
-            detail = message("Complétez les bords du cadre.", "Fill the frame edges.")
+            detail = String(localized: "Fill the frame edges.")
         case StitchingFailure.insufficientOverlap:
-            detail = message("Balayez plus lentement les zones manquantes.",
-                             "Sweep the missing areas more slowly.")
+            detail = String(localized: "Sweep the missing areas more slowly.")
         case StitchingFailure.invalidGeometry:
-            detail = message("Bougez moins l’iPhone pendant le balayage.",
-                             "Move the iPhone more steadily during the sweep.")
+            detail = String(localized: "Move the iPhone more steadily during the sweep.")
         default:
-            detail = message("Assemblage impossible. Continuez le balayage.",
-                             "Couldn’t stitch. Continue the sweep.")
+            detail = String(localized: "Couldn’t stitch. Continue the sweep.")
         }
         ui.issue = CaptureUIIssue(kind: .stitchingFailure, detail: detail, canRetry: false)
     }
@@ -584,6 +569,8 @@ final class UltraWideCoordinator {
         if let output = lastOutputURL { try? FileManager.default.removeItem(at: output) }
         lastOutputURL = nil
         automaticAssemblyKey = nil
+        reanchorImageURL = nil
+        ui.reanchorImage = nil
         ui.resultURL = nil
         ui.resultPreview = nil
         ui.resultPixelSize = nil
@@ -622,43 +609,38 @@ final class UltraWideCoordinator {
         return UIImage(cgImage: image)
     }
 
-    private func captureErrorMessage(_ error: Error) -> CaptureUIMessage {
+    private func captureErrorMessage(_ error: Error) -> String {
         guard let error = error as? CaptureError else {
-            return message("La prise de vue a échoué. Réessayez.", "Capture failed. Try again.")
+            return String(localized: "Capture failed. Try again.")
         }
         if case .orientationChanged = error {
             let orientation = capture.plan?.orientation ?? currentOrientation()
             return orientation.isPortrait
-                ? message("Tenez l’iPhone verticalement (mode portrait).", "Hold the iPhone vertically (portrait).")
-                : message("Tenez l’iPhone horizontalement (mode paysage).", "Hold the iPhone horizontally (landscape).")
+                ? String(localized: "Hold the iPhone vertically (portrait).")
+                : String(localized: "Hold the iPhone horizontally (landscape).")
         }
-        let english: String
-        switch error {
-        case .cameraPermissionDenied: english = "Allow camera access in Settings."
-        case .cameraUnavailable: english = "The camera is temporarily unavailable."
-        case .lensUnavailable: english = "This lens is unavailable on this iPhone."
-        case .targetUnavailable: english = "This field is unavailable with this lens."
-        case .cameraConfigurationFailed: english = "The camera could not be prepared."
-        case .motionUnavailable: english = "Motion sensors are unavailable."
-        case .notReady: english = "Wait for the camera to be ready."
-        case .notAligned: english = "Hold the iPhone still."
-        case .orientationChanged: english = "Hold the iPhone in the orientation of the displayed frame."
-        case .excessiveRoll: english = "Straighten the iPhone to keep the frame level."
-        case .noCurrentSlot: english = "No view is selected."
-        case .incompletePass: english = "Sweep a little further before stopping."
-        case .retakeLimitReached: english = "The sweep reached its frame limit."
-        case .invalidSlot: english = "This frame is unavailable."
-        case .noSavedSession: english = "There is no session to resume."
-        case .corruptSavedSession: english = "The saved session is incomplete."
-        case .photoDataUnavailable: english = "A video frame could not be read."
-        case .diskWriteFailed: english = "The frame could not be saved on this iPhone."
-        }
-        return message(error.localizedDescription, english)
+        return error.localizedDescription
     }
 
-    private func message(_ french: String, _ english: String) -> CaptureUIMessage {
-        CaptureUIMessage(french: french, english: english)
+    private static func makeResultsDirectory() throws -> URL {
+        var directory = resultsDirectory
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? directory.setResourceValues(values)
+        return directory
+    }
+
+    /// A result that was never saved, or an export interrupted by the system,
+    /// cannot be reopened after a relaunch. Reclaim its storage before any new
+    /// capture: a full-resolution assembly buffer can occupy hundreds of MB.
+    private static func removeAbandonedFiles() {
+        let manager = FileManager.default
+        try? manager.removeItem(at: resultsDirectory)
+        let temporary = manager.temporaryDirectory
+        let names = (try? manager.contentsOfDirectory(atPath: temporary.path)) ?? []
+        for name in names where name.hasPrefix("ultrawide-") {
+            try? manager.removeItem(at: temporary.appendingPathComponent(name))
+        }
     }
 }
-
-private enum PhotoSaveError: Error { case failed }

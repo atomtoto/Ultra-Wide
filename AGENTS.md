@@ -1,3 +1,6 @@
+# General
+Ask clarifying questions whenever my requests are ambiguous. Prefer committing directly to `main`.
+
 # SwiftUI Native-First Design
 
 When building or modifying the UI of this app, follow a **native-first SwiftUI approach**.

@@ -43,20 +43,20 @@
         }
       }
     },
-    "NSPhotoLibraryAddUsageDescription" : {
-      "comment" : "Privacy - Photo Library Additions Usage Description",
+    "NSPhotoLibraryUsageDescription" : {
+      "comment" : "Privacy - Photo Library Usage Description",
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Ultra Wide saves your assembled photo to Photos when you ask."
+            "value" : "Ultra Wide looks for its Ultra Wide album in Photos and adds your assembled photo to it when you ask."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ultra Wide enregistre votre photo assemblée dans Photos à votre demande."
+            "value" : "Ultra Wide recherche son album Ultra Wide dans Photos et y ajoute votre photo assemblée à votre demande."
           }
         }
       }

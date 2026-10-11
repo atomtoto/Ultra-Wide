@@ -33,6 +33,9 @@ final class UltraWideCoordinator {
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("UltraWideResults", isDirectory: true)
 
+    /// Photos saved from the app are added to this album in Photos.
+    private static let ultraWideAlbumTitle = "Ultra Wide"
+
     init() {
         Self.removeAbandonedFiles()
         ui.onAction = { [weak self] action in
@@ -362,11 +365,18 @@ final class UltraWideCoordinator {
         Task { [weak self] in await self?.assemble() }
     }
 
+    private static func ultraWideAlbum() -> PHAssetCollection? {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "title = %@", ultraWideAlbumTitle)
+        return PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: options).firstObject
+    }
+
     private func saveToPhotos() async {
         guard let url = ui.resultURL, ui.saveState == .idle else { return }
         ui.saveState = .saving
         ui.issue = nil
-        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        // Finding the album needs read-write access, which add-only does not allow.
+        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
         guard status == .authorized || status == .limited else {
             ui.saveState = .idle
             ui.issue = CaptureUIIssue(kind: .photoLibraryPermission,
@@ -374,9 +384,18 @@ final class UltraWideCoordinator {
                                       canRetry: false)
             return
         }
+        let album = Self.ultraWideAlbum()
         do {
             try await PHPhotoLibrary.shared().performChanges {
-                PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: url, options: nil)
+                let creation = PHAssetCreationRequest.forAsset()
+                creation.addResource(with: .photo, fileURL: url, options: nil)
+                guard let placeholder = creation.placeholderForCreatedAsset else { return }
+                if let album {
+                    PHAssetCollectionChangeRequest(for: album)?.addAssets([placeholder] as NSArray)
+                } else {
+                    PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: Self.ultraWideAlbumTitle)
+                        .addAssets([placeholder] as NSArray)
+                }
             }
             ui.saveState = .saved
             ui.issue = nil

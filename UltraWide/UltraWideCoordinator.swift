@@ -375,21 +375,26 @@ final class UltraWideCoordinator {
         guard let url = ui.resultURL, ui.saveState == .idle else { return }
         ui.saveState = .saving
         ui.issue = nil
-        // Finding the album needs read-write access, which add-only does not allow.
-        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
-        guard status == .authorized || status == .limited else {
-            ui.saveState = .idle
-            ui.issue = CaptureUIIssue(kind: .photoLibraryPermission,
-                                      detail: String(localized: "Allow Photos access in Settings, or use Share."),
-                                      canRetry: false)
-            return
+        // Finding the album needs read-write access. Without it, the photo is still
+        // saved with add-only access, but outside the album.
+        let readWrite = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        let canUseAlbum = readWrite == .authorized || readWrite == .limited
+        if !canUseAlbum {
+            let addOnly = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+            guard addOnly == .authorized || addOnly == .limited else {
+                ui.saveState = .idle
+                ui.issue = CaptureUIIssue(kind: .photoLibraryPermission,
+                                          detail: String(localized: "Allow Photos access in Settings, or use Share."),
+                                          canRetry: false)
+                return
+            }
         }
-        let album = Self.ultraWideAlbum()
+        let album = canUseAlbum ? Self.ultraWideAlbum() : nil
         do {
             try await PHPhotoLibrary.shared().performChanges {
                 let creation = PHAssetCreationRequest.forAsset()
                 creation.addResource(with: .photo, fileURL: url, options: nil)
-                guard let placeholder = creation.placeholderForCreatedAsset else { return }
+                guard canUseAlbum, let placeholder = creation.placeholderForCreatedAsset else { return }
                 if let album {
                     PHAssetCollectionChangeRequest(for: album)?.addAssets([placeholder] as NSArray)
                 } else {
